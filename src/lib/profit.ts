@@ -6,6 +6,8 @@
  *   ยอดขายก่อนหัก (grossSales)  = ราคาต่อชิ้น × จำนวนชิ้น
  *   รายได้สุทธิ (netRevenue)     = grossSales − ส่วนลด − เงินคืน
  *   ต้นทุนสินค้า (cogs)          = ต้นทุนต่อชิ้น × (จำนวนชิ้น − ชิ้นที่ได้คืน)
+ *                                  ต้นทุนต่อชิ้นใช้ค่าที่บันทึกไว้กับรายการขาย ณ วันนำเข้า (sale.unitCost)
+ *                                  ถ้าไม่มี (ข้อมูลเก่า) จึงใช้ต้นทุนปัจจุบันในหน้าสินค้า
  *   ค่าธรรมเนียมในคำสั่งซื้อ     = ค่าธรรมเนียมแพลตฟอร์ม + ค่าขนส่งที่ร้านออก   (มาจากไฟล์ CSV)
  *   กำไรหลังหักต้นทุนขาย        = netRevenue − cogs − ค่าธรรมเนียมในคำสั่งซื้อ
  *   ค่าใช้จ่ายที่บันทึกเอง        = ผลรวมรายการในหน้า "ค่าใช้จ่าย"            (ไม่ได้มาจาก CSV)
@@ -36,11 +38,15 @@ export interface LineBreakdown {
   orderFees: number;
   /** กำไรของบรรทัดนี้ (ยังไม่รวมค่าใช้จ่ายที่บันทึกเอง) */
   lineProfit: number;
-  /** ไม่พบต้นทุนของ SKU นี้ (ใช้ต้นทุน 0) */
+  /** ไม่มีทั้ง snapshot และต้นทุนในหน้าสินค้า (ใช้ต้นทุน 0) */
   costMissing: boolean;
 }
 
-export function calcLine(sale: Sale, unitCost: number | undefined): LineBreakdown {
+/**
+ * @param fallbackCost ต้นทุนปัจจุบันจากหน้าสินค้า ใช้เฉพาะเมื่อรายการขายไม่มี snapshot
+ */
+export function calcLine(sale: Sale, fallbackCost: number | undefined): LineBreakdown {
+  const unitCost = sale.unitCost ?? fallbackCost;
   const grossSales = round2(sale.unitPrice * sale.quantity);
   const netRevenue = round2(grossSales - sale.discount - sale.refund);
   const costUnits = Math.max(0, sale.quantity - sale.returnedQty);

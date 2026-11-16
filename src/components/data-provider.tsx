@@ -1,23 +1,26 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { clearAll, getDB, loadAll, writeSnapshot, type Snapshot } from "@/lib/db";
+import * as store from "@/lib/db";
+import type { ExpenseInput, ImportOutcome, ProductInput, RestorePointInfo, Snapshot } from "@/lib/db";
+import { backupFileName, createBackup, serializeBackup, type BackupFile } from "@/lib/backup";
 import { generateDemoData } from "@/lib/demo";
-import { newId } from "@/lib/id";
 import { presetRange, type RangePreset } from "@/lib/dates";
 import type { SaleDraft } from "@/lib/csv";
-import type { DatasetId, DateRange, Expense, ImportBatch, Product, Sale } from "@/lib/types";
+import type { DatasetId, DateRange } from "@/lib/types";
+
+export type { ExpenseInput, ProductInput };
 
 const DATASET_KEY = "profithub:dataset";
 const RANGE_KEY = "profithub:range";
-
-export type ProductInput = Pick<Product, "sku" | "name" | "unitCost">;
-export type ExpenseInput = Omit<Expense, "id" | "createdAt">;
+const lastBackupKey = (d: DatasetId) => `profithub:lastBackup:${d}`;
 
 interface RangeState {
   preset: RangePreset;
   custom: DateRange;
 }
+
+export type PersistState = "unsupported" | "persisted" | "not-persisted" | "unknown";
 
 interface DataContextValue extends Snapshot {
   ready: boolean;
@@ -30,10 +33,22 @@ interface DataContextValue extends Snapshot {
   clearCurrent: () => Promise<void>;
   saveProduct: (input: ProductInput, id?: string) => Promise<void>;
   deleteProduct: (id: string) => Promise<void>;
-  importSales: (drafts: SaleDraft[], fileName: string) => Promise<number>;
+  importSales: (drafts: SaleDraft[], fileName: string) => Promise<ImportOutcome>;
   deleteBatch: (batchId: string) => Promise<void>;
   saveExpense: (input: ExpenseInput, id?: string) => Promise<void>;
   deleteExpense: (id: string) => Promise<void>;
+  /** สร้างไฟล์ Backup ของชุดข้อมูลปัจจุบัน (อ่านจากฐานข้อมูลโดยตรง) */
+  exportBackup: () => Promise<{ fileName: string; text: string }>;
+  /** บันทึกเวลาสำรองล่าสุด หลังดาวน์โหลดสำเร็จ */
+  markBackedUp: () => void;
+  lastBackupAt: string | null;
+  /** ไม่เคยสำรอง หรือสำรองล่าสุดเกิน 7 วัน */
+  backupDue: boolean;
+  restoreBackup: (b: BackupFile) => Promise<void>;
+  restorePoints: RestorePointInfo[];
+  restoreFromPoint: (id: string) => Promise<void>;
+  persist: PersistState;
+  requestPersist: () => Promise<void>;
   range: DateRange;
   rangeState: RangeState;
   setRangeState: (r: RangeState) => void;
@@ -60,19 +75,33 @@ function writeStorage(key: string, value: unknown) {
   }
 }
 
+async function readPersist(): Promise<PersistState> {
+  try {
+    if (!navigator.storage?.persisted) return "unsupported";
+    return (await navigator.storage.persisted()) ? "persisted" : "not-persisted";
+  } catch {
+    return "unknown";
+  }
+}
+
 export function DataProvider({ children }: { children: ReactNode }) {
   const [dataset, setDataset] = useState<DatasetId>("real");
   const [data, setData] = useState<Snapshot>(EMPTY);
+  const [restorePoints, setRestorePoints] = useState<RestorePointInfo[]>([]);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastBackupAt, setLastBackupAt] = useState<string | null>(null);
+  const [persist, setPersist] = useState<PersistState>("unknown");
   // วันที่ปัจจุบันอ่านในเบราว์เซอร์เท่านั้น (ไม่อ่านตอน prerender)
   const [today, setToday] = useState<Date | null>(null);
   const [rangeState, setRangeStateRaw] = useState<RangeState>({ preset: "30d", custom: { from: null, to: null } });
 
   const reload = useCallback(async (d: DatasetId) => {
     try {
-      const snap = await loadAll(d);
+      const [snap, points] = await Promise.all([store.loadAll(d), store.listRestorePoints(d)]);
       setData(snap);
+      setRestorePoints(points);
+      setLastBackupAt(readStorage<string | null>(lastBackupKey(d), null));
       setError(null);
     } catch (e) {
       setError(
@@ -94,6 +123,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       if (r && r.preset) setRangeStateRaw(r);
       setDataset(d);
       await reload(d);
+      setPersist(await readPersist());
     })();
     return () => {
       cancelled = true;
@@ -110,120 +140,50 @@ export function DataProvider({ children }: { children: ReactNode }) {
   );
 
   const resetDemo = useCallback(async () => {
-    await clearAll("demo");
-    await writeSnapshot("demo", generateDemoData(new Date()));
+    await store.replaceAll("demo", generateDemoData(new Date()), { reason: "ก่อนรีเซ็ตข้อมูล Demo", restorePoint: false });
     if (dataset === "demo") await reload("demo");
   }, [dataset, reload]);
 
   const startDemo = useCallback(async () => {
-    const snap = await loadAll("demo");
-    if (snap.products.length === 0 && snap.sales.length === 0) {
-      await writeSnapshot("demo", generateDemoData(new Date()));
+    const snap = await store.loadAll("demo");
+    if (snap.products.length === 0 && snap.sales.length === 0 && snap.expenses.length === 0) {
+      await store.replaceAll("demo", generateDemoData(new Date()), { reason: "สร้างข้อมูล Demo", restorePoint: false });
     }
     await switchDataset("demo");
   }, [switchDataset]);
 
-  const clearCurrent = useCallback(async () => {
-    await clearAll(dataset);
-    await reload(dataset);
-  }, [dataset, reload]);
-
-  const saveProduct = useCallback(
-    async (input: ProductInput, id?: string) => {
-      const db = await getDB(dataset);
-      const sku = input.sku.trim().toUpperCase();
-      const clash = await db.getFromIndex("products", "sku", sku);
-      if (clash && clash.id !== id) throw new Error(`SKU "${sku}" มีอยู่แล้ว`);
-      const now = new Date().toISOString();
-      if (id) {
-        const old = await db.get("products", id);
-        if (!old) throw new Error("ไม่พบสินค้า");
-        if (old.sku !== sku) {
-          const used = data.sales.some((s) => s.sku.toUpperCase() === old.sku.toUpperCase());
-          if (used) throw new Error("เปลี่ยน SKU ไม่ได้ เพราะมีรายการขายที่ใช้ SKU นี้แล้ว");
+  /** ทุกการเปลี่ยนแปลงเขียนลงฐานข้อมูลก่อน แล้วโหลดใหม่ เพื่อให้หน้าจอตรงกับข้อมูลที่บันทึกจริง */
+  const mutate = useCallback(
+    <A extends unknown[], R>(fn: (d: DatasetId, ...args: A) => Promise<R>) =>
+      async (...args: A): Promise<R> => {
+        try {
+          return await fn(dataset, ...args);
+        } finally {
+          await reload(dataset);
         }
-        await db.put("products", { ...old, sku, name: input.name.trim(), unitCost: input.unitCost, updatedAt: now });
-      } else {
-        await db.add("products", { id: newId(), sku, name: input.name.trim(), unitCost: input.unitCost, createdAt: now, updatedAt: now });
-      }
-      await reload(dataset);
-    },
-    [dataset, data.sales, reload],
-  );
-
-  const deleteProduct = useCallback(
-    async (id: string) => {
-      const db = await getDB(dataset);
-      const p = await db.get("products", id);
-      if (!p) return;
-      const used = data.sales.filter((s) => s.sku.toUpperCase() === p.sku.toUpperCase()).length;
-      if (used) throw new Error(`ลบไม่ได้ เพราะมีรายการขาย ${used} รายการที่ใช้ SKU นี้ (ลบชุดนำเข้าที่เกี่ยวข้องก่อน)`);
-      await db.delete("products", id);
-      await reload(dataset);
-    },
-    [dataset, data.sales, reload],
-  );
-
-  const importSales = useCallback(
-    async (drafts: SaleDraft[], fileName: string) => {
-      const db = await getDB(dataset);
-      const batch: ImportBatch = { id: newId(), fileName, importedAt: new Date().toISOString(), rowCount: 0 };
-      const tx = db.transaction(["sales", "batches"], "readwrite");
-      const store = tx.objectStore("sales");
-      let added = 0;
-      for (const d of drafts) {
-        // ตรวจซ้ำอีกครั้งในฐานข้อมูล (กันกรณีกดนำเข้าซ้ำ)
-        const exists = await store.index("dedupeKey").getKey(d.dedupeKey);
-        if (exists) continue;
-        const s: Sale = { ...d, id: newId(), batchId: batch.id };
-        await store.add(s);
-        added++;
-      }
-      batch.rowCount = added;
-      if (added > 0) await tx.objectStore("batches").add(batch);
-      await tx.done;
-      await reload(dataset);
-      return added;
-    },
+      },
     [dataset, reload],
   );
 
-  const deleteBatch = useCallback(
-    async (batchId: string) => {
-      const db = await getDB(dataset);
-      const tx = db.transaction(["sales", "batches"], "readwrite");
-      const keys = await tx.objectStore("sales").index("batchId").getAllKeys(batchId);
-      for (const k of keys) await tx.objectStore("sales").delete(k);
-      await tx.objectStore("batches").delete(batchId);
-      await tx.done;
-      await reload(dataset);
-    },
-    [dataset, reload],
-  );
+  const exportBackup = useCallback(async () => {
+    const snap = await store.loadAll(dataset);
+    const now = new Date();
+    return { fileName: backupFileName(dataset, now), text: serializeBackup(createBackup(dataset, snap, now)) };
+  }, [dataset]);
 
-  const saveExpense = useCallback(
-    async (input: ExpenseInput, id?: string) => {
-      const db = await getDB(dataset);
-      if (id) {
-        const old = await db.get("expenses", id);
-        if (!old) throw new Error("ไม่พบรายการ");
-        await db.put("expenses", { ...old, ...input });
-      } else {
-        await db.add("expenses", { ...input, id: newId(), createdAt: new Date().toISOString() });
-      }
-      await reload(dataset);
-    },
-    [dataset, reload],
-  );
+  const markBackedUp = useCallback(() => {
+    const now = new Date().toISOString();
+    writeStorage(lastBackupKey(dataset), now);
+    setLastBackupAt(now);
+  }, [dataset]);
 
-  const deleteExpense = useCallback(
-    async (id: string) => {
-      const db = await getDB(dataset);
-      await db.delete("expenses", id);
-      await reload(dataset);
-    },
-    [dataset, reload],
-  );
+  const requestPersist = useCallback(async () => {
+    try {
+      if (navigator.storage?.persist) await navigator.storage.persist();
+    } finally {
+      setPersist(await readPersist());
+    }
+  }, []);
 
   const setRangeState = useCallback((r: RangeState) => {
     setRangeStateRaw(r);
@@ -248,13 +208,26 @@ export function DataProvider({ children }: { children: ReactNode }) {
     switchDataset,
     startDemo,
     resetDemo,
-    clearCurrent,
-    saveProduct,
-    deleteProduct,
-    importSales,
-    deleteBatch,
-    saveExpense,
-    deleteExpense,
+    clearCurrent: mutate((d) => store.clearAll(d)),
+    saveProduct: mutate(store.saveProduct),
+    deleteProduct: mutate(store.deleteProduct),
+    importSales: mutate(store.importSales),
+    deleteBatch: mutate(async (d, id: string) => void (await store.deleteBatch(d, id))),
+    saveExpense: mutate(store.saveExpense),
+    deleteExpense: mutate(store.deleteExpense),
+    exportBackup,
+    markBackedUp,
+    lastBackupAt,
+    backupDue: !lastBackupAt || (today !== null && today.getTime() - Date.parse(lastBackupAt) > 7 * 86_400_000),
+    restoreBackup: mutate(async (d, b: BackupFile) => {
+      // ป้องกันซ้ำอีกชั้น: ห้ามกู้คืนข้ามชุดข้อมูล (จริง ↔ Demo)
+      if (b.dataset !== d) throw new Error("ชุดข้อมูลในไฟล์ไม่ตรงกับชุดข้อมูลที่เปิดอยู่");
+      await store.replaceAll(d, b.data, { reason: "ก่อนกู้คืนจากไฟล์ Backup", restorePoint: true });
+    }),
+    restorePoints,
+    restoreFromPoint: mutate(store.restoreFromPoint),
+    persist,
+    requestPersist,
     range,
     rangeState,
     setRangeState,

@@ -1,6 +1,7 @@
 import Papa from "papaparse";
 import { toISODate } from "./dates";
 import type { Sale } from "./types";
+import { LIMITS, validateSku } from "./validation";
 
 /** คอลัมน์ของไฟล์นำเข้ายอดขาย */
 export const SALES_COLUMNS = [
@@ -103,7 +104,8 @@ export function parseDate(raw: string | undefined): string | null {
   return toISODate(dt);
 }
 
-export type SaleDraft = Omit<Sale, "id" | "batchId">;
+/** รายการขายที่ผ่านการตรวจแล้ว พร้อมต้นทุนต่อชิ้น ณ เวลาตรวจ */
+export type SaleDraft = Omit<Sale, "id" | "batchId" | "unitCost"> & { unitCost: number };
 
 export type RowStatus = "ok" | "error" | "duplicate";
 
@@ -125,7 +127,8 @@ export interface ValidationResult {
 }
 
 export interface ValidateOptions {
-  knownSkus: Set<string>;
+  /** SKU (ตัวพิมพ์ใหญ่) → ต้นทุนต่อชิ้นปัจจุบัน */
+  productCosts: Map<string, number>;
   existingKeys: Set<string>;
 }
 
@@ -150,6 +153,9 @@ export function validateSalesCsv(text: string, opts: ValidateOptions): Validatio
     fileErrors.push(`ไม่พบคอลัมน์ที่จำเป็น: ${missing.map((c) => `${c.key} (${c.label})`).join(", ")}`);
   }
   if (parsed.data.length === 0 && fileErrors.length === 0) fileErrors.push("ไฟล์ไม่มีข้อมูล");
+  if (parsed.data.length > LIMITS.maxCsvRows) {
+    fileErrors.push(`ไฟล์มี ${parsed.data.length} แถว เกินขีดจำกัด ${LIMITS.maxCsvRows} แถวต่อไฟล์ กรุณาแบ่งไฟล์`);
+  }
   for (const e of parsed.errors) {
     if (e.code === "UndetectableDelimiter") continue;
     if (e.row === undefined) fileErrors.push(`อ่านไฟล์ไม่ได้: ${e.message}`);
@@ -173,16 +179,20 @@ export function validateSalesCsv(text: string, opts: ValidateOptions): Validatio
 
     const orderId = str("order_id");
     if (!orderId) errors.push("ไม่มีเลขคำสั่งซื้อ (order_id)");
+    else if (orderId.length > LIMITS.orderIdLength) errors.push(`เลขคำสั่งซื้อยาวเกิน ${LIMITS.orderIdLength} ตัวอักษร`);
 
     const date = parseDate(raw.order_date);
     if (!date) errors.push(`วันที่ไม่ถูกต้อง "${str("order_date")}" (ใช้ YYYY-MM-DD หรือ DD/MM/YYYY)`);
 
     const channel = normalizeChannel(str("channel"));
     if (!channel) errors.push("ไม่มีช่องทางขาย (channel)");
+    else if (channel.length > LIMITS.channelLength) errors.push(`ช่องทางขายยาวเกิน ${LIMITS.channelLength} ตัวอักษร`);
 
     const sku = str("sku").toUpperCase();
+    const skuError = sku ? validateSku(sku) : null;
     if (!sku) errors.push("ไม่มี SKU");
-    else if (!opts.knownSkus.has(sku)) errors.push(`ไม่พบ SKU "${sku}" ในหน้าสินค้า กรุณาเพิ่มสินค้าและต้นทุนก่อน`);
+    else if (skuError) errors.push(skuError);
+    else if (!opts.productCosts.has(sku)) errors.push(`ไม่พบ SKU "${sku}" ในหน้าสินค้า กรุณาเพิ่มสินค้าและต้นทุนก่อน`);
 
     const num = (k: ColumnKey, label: string, required: boolean, integer = false): number => {
       const v = parseAmount(raw[k]);
@@ -195,6 +205,7 @@ export function validateSalesCsv(text: string, opts: ValidateOptions): Validatio
         return 0;
       }
       if (v < 0) errors.push(`${label}ต้องไม่ติดลบ`);
+      else if (v > (integer ? LIMITS.maxQuantity : LIMITS.maxAmount)) errors.push(`${label}สูงผิดปกติ (${str(k)})`);
       if (integer && !Number.isInteger(v)) errors.push(`${label}ต้องเป็นจำนวนเต็ม`);
       return v;
     };
@@ -246,6 +257,7 @@ export function validateSalesCsv(text: string, opts: ValidateOptions): Validatio
               returnedQty,
               platformFee,
               shippingFee,
+              unitCost: opts.productCosts.get(sku)!,
               dedupeKey,
             }
           : undefined,
@@ -261,7 +273,16 @@ export function validateSalesCsv(text: string, opts: ValidateOptions): Validatio
   };
 }
 
+/**
+ * ป้องกัน CSV/Formula Injection: ข้อความที่ขึ้นต้นด้วย = + - @ tab หรือ CR
+ * จะถูกเติม ' ข้างหน้า เพื่อไม่ให้ Excel/Google Sheets ตีความเป็นสูตร (ค่าที่เป็นตัวเลขไม่ถูกแก้)
+ */
+export function sanitizeCell(v: string | number): string | number {
+  if (typeof v !== "string") return v;
+  return /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;
+}
+
 /** สร้างข้อความ CSV (มี BOM เพื่อให้ Excel แสดงภาษาไทยถูกต้อง) */
 export function toCsv(rows: (string | number)[][]): string {
-  return "﻿" + Papa.unparse(rows);
+  return "﻿" + Papa.unparse(rows.map((r) => r.map(sanitizeCell)));
 }

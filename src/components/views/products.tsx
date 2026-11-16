@@ -4,6 +4,7 @@ import { useMemo, useState, type FormEvent } from "react";
 import { Package, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { formatBaht, formatNumber } from "@/lib/format";
 import type { Product } from "@/lib/types";
+import { LIMITS, validateSku } from "@/lib/validation";
 import { useData } from "../data-provider";
 import { Button, Card, ConfirmDialog, EmptyState, Field, inputClass, Loading, Modal, PageHeader } from "../ui";
 
@@ -134,7 +135,10 @@ export function ProductsView() {
         title="ลบสินค้า"
         message={
           <>
-            ต้องการลบ <b>{deleting?.name}</b> ({deleting?.sku}) ใช่หรือไม่?
+            <p>
+              ต้องการลบ <b>{deleting?.name}</b> ({deleting?.sku}) ใช่หรือไม่? การลบนี้ย้อนกลับไม่ได้
+            </p>
+            <p className="mt-2 text-xs text-slate-500">ลบได้เฉพาะสินค้าที่ยังไม่มีรายการขาย เพื่อไม่ให้ประวัติกำไรผิดพลาด</p>
           </>
         }
         confirmLabel="ลบสินค้า"
@@ -173,13 +177,15 @@ function ProductForm({
   async function submit(e: FormEvent) {
     e.preventDefault();
     const errs: Record<string, string> = {};
-    const skuT = sku.trim();
-    if (!skuT) errs.sku = "กรุณาระบุ SKU";
-    else if (/[,\s]/.test(skuT)) errs.sku = "SKU ห้ามมีช่องว่างหรือเครื่องหมายจุลภาค";
+    const skuT = sku.trim().toUpperCase();
+    const skuErr = validateSku(skuT);
+    if (skuErr) errs.sku = skuErr;
     if (!name.trim()) errs.name = "กรุณาระบุชื่อสินค้า";
+    else if (name.trim().length > LIMITS.nameLength) errs.name = `ชื่อสินค้ายาวเกิน ${LIMITS.nameLength} ตัวอักษร`;
     const c = Number(cost.replace(/,/g, ""));
     if (cost.trim() === "" || !Number.isFinite(c)) errs.cost = "กรุณาระบุต้นทุนเป็นตัวเลข";
     else if (c < 0) errs.cost = "ต้นทุนต้องไม่ติดลบ";
+    else if (c > LIMITS.maxAmount) errs.cost = "ต้นทุนสูงผิดปกติ";
     setErrors(errs);
     if (Object.keys(errs).length) return;
     setSaving(true);
@@ -204,6 +210,11 @@ function ProductForm({
         <Field label="ต้นทุนต่อชิ้น (บาท)" hint="รวมค่าสินค้าที่ซื้อมา/ผลิต ไม่รวมค่าแพ็กและค่าส่ง (บันทึกแยกในค่าใช้จ่าย)" error={errors.cost}>
           <input value={cost} onChange={(e) => setCost(e.target.value)} className={inputClass + " num"} inputMode="decimal" placeholder="0.00" />
         </Field>
+        {existing && cost.trim() !== "" && Number(cost.replace(/,/g, "")) !== existing.unitCost && (
+          <p className="rounded-xl bg-brand-50 p-3 text-xs text-brand-800">
+            ต้นทุนใหม่จะใช้กับรายการขายที่นำเข้า<b>หลังจากนี้</b>เท่านั้น รายการขายเดิมยังใช้ต้นทุน ณ วันที่นำเข้า กำไรย้อนหลังจึงไม่เปลี่ยน
+          </p>
+        )}
         {errors.form && <p className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{errors.form}</p>}
         <div className="grid grid-cols-2 gap-2 pt-2">
           <Button variant="secondary" onClick={onClose}>

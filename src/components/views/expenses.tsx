@@ -8,6 +8,7 @@ import { formatBaht } from "@/lib/format";
 import { round2, sum } from "@/lib/money";
 import { filterByRange } from "@/lib/profit";
 import { EXPENSE_CATEGORIES, EXPENSE_LABELS, type Expense, type ExpenseCategory } from "@/lib/types";
+import { LIMITS } from "@/lib/validation";
 import { useData, type ExpenseInput } from "../data-provider";
 import { RangeFilter } from "../range-filter";
 import { Badge, Button, Card, ConfirmDialog, EmptyState, Field, inputClass, Loading, Modal, PageHeader } from "../ui";
@@ -138,7 +139,7 @@ export function ExpensesView() {
       <ConfirmDialog
         open={!!deleting}
         title="ลบค่าใช้จ่าย"
-        message={deleting ? `ลบ ${EXPENSE_LABELS[deleting.category]} ${formatBaht(deleting.amount)} วันที่ ${formatThaiDate(deleting.date)} ใช่หรือไม่?` : ""}
+        message={deleting ? `ลบ ${EXPENSE_LABELS[deleting.category]} ${formatBaht(deleting.amount)} วันที่ ${formatThaiDate(deleting.date)} ใช่หรือไม่? การลบนี้ย้อนกลับไม่ได้ และกำไรสุทธิจะเปลี่ยนตาม` : ""}
         confirmLabel="ลบ"
         onClose={() => setDeleting(null)}
         onConfirm={async () => {
@@ -177,6 +178,8 @@ function ExpenseForm({
     const a = Number(amount.replace(/,/g, ""));
     if (amount.trim() === "" || !Number.isFinite(a)) errs.amount = "กรุณาระบุจำนวนเงิน";
     else if (a <= 0) errs.amount = "จำนวนเงินต้องมากกว่า 0";
+    else if (a > LIMITS.maxAmount) errs.amount = "จำนวนเงินสูงผิดปกติ";
+    if (note.trim().length > LIMITS.noteLength) errs.note = `หมายเหตุยาวเกิน ${LIMITS.noteLength} ตัวอักษร`;
     setErrors(errs);
     if (Object.keys(errs).length) return;
     setSaving(true);
@@ -224,7 +227,7 @@ function ExpenseForm({
             ))}
           </select>
         </Field>
-        <Field label="หมายเหตุ">
+        <Field label="หมายเหตุ" error={errors.note}>
           <input value={note} onChange={(e) => setNote(e.target.value)} className={inputClass} placeholder="เช่น Shopee Ads สัปดาห์ที่ 1" />
         </Field>
         {errors.form && <p className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{errors.form}</p>}

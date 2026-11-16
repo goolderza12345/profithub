@@ -98,6 +98,7 @@ export function generateDemoData(today: Date, days = 90): Snapshot {
           returnedQty,
           platformFee,
           shippingFee,
+          unitCost: p.unitCost,
           dedupeKey: makeDedupeKey(ch.name, orderId, p.sku),
           batchId,
         });

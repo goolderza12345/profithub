@@ -9,7 +9,7 @@ const expenses = [expense({ amount: 50, category: "ads" })];
 describe("reports", () => {
   it("งบกำไรขาดทุนจบที่กำไรสุทธิเดียวกับสูตร", () => {
     const rows = buildReportRows("profit", sales, expenses, products);
-    const net = rows.find((r) => r[0] === "= กำไรสุทธิ")!;
+    const net = rows.find((r) => r[0] === "กำไรสุทธิ")!;
     expect(net[1]).toBe(200 - 10 - 80 - 19 - 50);
   });
 

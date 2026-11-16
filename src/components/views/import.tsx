@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useMemo, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, Copy, Download, FileSpreadsheet, History, Trash2, Upload, XCircle } from "lucide-react";
+import type { ImportOutcome } from "@/lib/db";
 import { SALES_COLUMNS, SAMPLE_CSV, validateSalesCsv, type RowStatus, type ValidationResult } from "@/lib/csv";
 import { downloadText } from "@/lib/download";
 import { formatNumber } from "@/lib/format";
@@ -30,18 +31,20 @@ export function ImportView() {
   const [result, setResult] = useState<ValidationResult | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState<{ added: number; fileName: string } | null>(null);
+  const [done, setDone] = useState<(ImportOutcome & { fileName: string }) | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
   const [readError, setReadError] = useState<string | null>(null);
   const [batchToDelete, setBatchToDelete] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const knownSkus = useMemo(() => new Set(products.map((p) => p.sku.toUpperCase())), [products]);
+  const productCosts = useMemo(() => new Map(products.map((p) => [p.sku.toUpperCase(), p.unitCost])), [products]);
   const existingKeys = useMemo(() => new Set(sales.map((s) => s.dedupeKey)), [sales]);
 
   async function handleFile(file: File | undefined) {
     if (!file) return;
     setDone(null);
     setReadError(null);
+    setImportError(null);
     setFilter("all");
     if (!/\.csv$/i.test(file.name) && file.type !== "text/csv") {
       setResult(null);
@@ -55,7 +58,7 @@ export function ImportView() {
     }
     const text = await readFileText(file);
     setFileName(file.name);
-    setResult(validateSalesCsv(text, { knownSkus, existingKeys }));
+    setResult(validateSalesCsv(text, { productCosts, existingKeys }));
   }
 
   function reset() {
@@ -69,9 +72,11 @@ export function ImportView() {
     setBusy(true);
     try {
       const drafts = result.rows.filter((r) => r.status === "ok" && r.sale).map((r) => r.sale!);
-      const added = await importSales(drafts, fileName);
-      setDone({ added, fileName });
+      const outcome = await importSales(drafts, fileName);
+      setDone({ ...outcome, fileName });
       reset();
+    } catch (e) {
+      setImportError("นำเข้าไม่สำเร็จ ไม่มีรายการใดถูกบันทึก: " + (e instanceof Error ? e.message : String(e)));
     } finally {
       setBusy(false);
     }
@@ -83,10 +88,10 @@ export function ImportView() {
     const set = new Set<string>();
     for (const r of result.rows) {
       const sku = (r.raw.sku ?? "").trim().toUpperCase();
-      if (sku && !knownSkus.has(sku)) set.add(sku);
+      if (sku && !productCosts.has(sku)) set.add(sku);
     }
     return [...set];
-  }, [result, knownSkus]);
+  }, [result, productCosts]);
 
   if (!ready) return <Loading />;
 
@@ -107,7 +112,9 @@ export function ImportView() {
         <div className="mb-4 flex gap-3 rounded-2xl bg-emerald-50 p-4 text-sm text-emerald-900 ring-1 ring-emerald-200">
           <CheckCircle2 size={18} className="mt-0.5 shrink-0" />
           <p>
-            นำเข้า <b>{formatNumber(done.added)}</b> รายการจาก {done.fileName} เรียบร้อย —{" "}
+            นำเข้า <b>{formatNumber(done.added)}</b> รายการจาก {done.fileName} เรียบร้อย (บันทึกต้นทุนต่อชิ้น ณ วันนี้ไว้กับทุกรายการ)
+            {done.skippedDuplicate > 0 && ` · ข้ามรายการซ้ำ ${formatNumber(done.skippedDuplicate)}`}
+            {done.skippedMissingProduct > 0 && ` · ข้าม ${formatNumber(done.skippedMissingProduct)} รายการเพราะสินค้าถูกลบระหว่างนำเข้า`} —{" "}
             <Link href="/" className="font-medium underline">
               ดูภาพรวม
             </Link>
@@ -161,6 +168,13 @@ export function ImportView() {
                 </Button>
               </div>
 
+              {fileName && batches.some((b) => b.fileName === fileName) && (
+                <p className="mb-3 flex gap-2 rounded-xl bg-amber-50 p-3 text-sm text-amber-900">
+                  <AlertTriangle size={18} className="shrink-0" />
+                  เคยนำเข้าไฟล์ชื่อนี้แล้ว — แถวที่นำเข้าไปแล้วจะถูกข้ามอัตโนมัติ ตรวจสอบว่าไม่ได้เลือกไฟล์ผิด
+                </p>
+              )}
+              {importError && <p className="mb-3 rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{importError}</p>}
               {result.fileErrors.length > 0 ? (
                 <div className="space-y-2">
                   {result.fileErrors.map((e) => (
@@ -314,7 +328,15 @@ export function ImportView() {
       <ConfirmDialog
         open={!!batchToDelete}
         title="ลบชุดนำเข้า"
-        message="รายการขายทั้งหมดจากไฟล์นี้จะถูกลบ (สินค้าและค่าใช้จ่ายไม่ได้รับผลกระทบ) และสามารถนำเข้าไฟล์เดิมใหม่ได้"
+        message={
+          <>
+            <p>
+              รายการขาย <b>{formatNumber(batches.find((b) => b.id === batchToDelete)?.rowCount ?? 0)} รายการ</b> จากไฟล์{" "}
+              <b>{batches.find((b) => b.id === batchToDelete)?.fileName}</b> จะถูกลบ (สินค้าและค่าใช้จ่ายไม่ได้รับผลกระทบ)
+            </p>
+            <p className="mt-2 text-xs text-slate-500">ระบบเก็บจุดกู้คืนอัตโนมัติไว้ก่อนลบ ย้อนกลับได้ที่หน้า “ตั้งค่าข้อมูล”</p>
+          </>
+        }
         confirmLabel="ลบรายการขาย"
         onClose={() => setBatchToDelete(null)}
         onConfirm={async () => {

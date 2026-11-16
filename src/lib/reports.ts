@@ -29,10 +29,10 @@ export function buildReportRows(
   switch (kind) {
     case "sales":
       return [
-        ["วันที่", "ช่องทาง", "เลขคำสั่งซื้อ", "SKU", "ชื่อสินค้า", "จำนวน", "ราคาต่อชิ้น", "ยอดก่อนหัก", "ส่วนลด", "เงินคืน", "รายได้สุทธิ"],
+        ["วันที่", "ช่องทาง", "เลขคำสั่งซื้อ", "SKU", "ชื่อสินค้า", "จำนวน", "ราคาต่อชิ้น", "ยอดก่อนหัก", "ส่วนลด", "เงินคืน", "รายได้สุทธิ", "ต้นทุนต่อชิ้น (ณ วันนำเข้า)", "ต้นทุนสินค้า"],
         ...sorted.map((s) => {
           const l = calcLine(s, costs.get(s.sku.toUpperCase()));
-          return [s.date, s.channel, s.orderId, s.sku, names.get(s.sku.toUpperCase()) ?? "", s.quantity, s.unitPrice, l.grossSales, l.discount, l.refund, l.netRevenue];
+          return [s.date, s.channel, s.orderId, s.sku, names.get(s.sku.toUpperCase()) ?? "", s.quantity, s.unitPrice, l.grossSales, l.discount, l.refund, l.netRevenue, l.unitCost, l.cogs];
         }),
       ];
     case "costs": {
@@ -56,13 +56,13 @@ export function buildReportRows(
         ["ยอดขายก่อนหัก", s.grossSales],
         ["หัก ส่วนลด", -s.discount],
         ["หัก เงินคืนลูกค้า", -s.refund],
-        ["= รายได้สุทธิ", s.netRevenue],
+        ["รายได้สุทธิ", s.netRevenue],
         ["หัก ต้นทุนสินค้า", -s.cogs],
-        ["= กำไรขั้นต้น", s.grossProfit],
+        ["กำไรขั้นต้น", s.grossProfit],
         ["หัก ค่าธรรมเนียมแพลตฟอร์ม (ในคำสั่งซื้อ)", -s.orderPlatformFees],
         ["หัก ค่าขนส่งที่ร้านออก (ในคำสั่งซื้อ)", -s.orderShippingFees],
         ...Object.entries(s.expensesByCategory).map(([c, v]) => [`หัก ${EXPENSE_LABELS[c as keyof typeof EXPENSE_LABELS]} (บันทึกเอง)`, -v]),
-        ["= กำไรสุทธิ", s.netProfit],
+        ["กำไรสุทธิ", s.netProfit],
         ["อัตรากำไรสุทธิ (%)", pct(s.netMargin)],
       ];
     }

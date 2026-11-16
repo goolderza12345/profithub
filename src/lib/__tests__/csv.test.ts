@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { makeDedupeKey, mapHeader, normalizeChannel, parseAmount, parseDate, SAMPLE_CSV, validateSalesCsv } from "../csv";
+import { sanitizeCell, toCsv, makeDedupeKey, mapHeader, normalizeChannel, parseAmount, parseDate, SAMPLE_CSV, validateSalesCsv } from "../csv";
 
 const opts = (keys: string[] = []) => ({
-  knownSkus: new Set(["TS-001", "MUG-002"]),
+  productCosts: new Map([["TS-001", 85], ["MUG-002", 95]]),
   existingKeys: new Set(keys),
 });
 
@@ -123,5 +123,48 @@ describe("validateSalesCsv", () => {
     const r = validateSalesCsv(HEADER + "\nO1,2026-11-01,Shopee,TS-001,1,199,0,0,0,0,0,EXTRA", opts());
     expect(r.rows[0].status).toBe("error");
     expect(r.rows[0].errors[0]).toContain("จำนวนคอลัมน์");
+  });
+
+  it("บันทึกต้นทุนต่อชิ้น ณ เวลาตรวจไว้ในรายการ (snapshot)", () => {
+    const r = validateSalesCsv(SAMPLE_CSV, opts());
+    expect(r.rows[0].sale!.unitCost).toBe(85);
+    expect(r.rows[1].sale!.unitCost).toBe(95);
+  });
+
+  it("ปฏิเสธข้อมูลที่ยาวหรือใหญ่ผิดปกติ", () => {
+    const csv = [
+      HEADER,
+      `${"X".repeat(65)},2026-11-01,Shopee,TS-001,1,199,,,,,`,
+      "O2,2026-11-01,Shopee,TS-001,1,999999999999,,,,,",
+      "O3,2026-11-01,Shopee,TS-001,99999999,10,,,,,",
+      `O4,2026-11-01,${"ช".repeat(41)},TS-001,1,10,,,,,`,
+    ].join("\n");
+    const r = validateSalesCsv(csv, opts());
+    expect(r.errorCount).toBe(4);
+    expect(r.rows[0].errors.join()).toContain("เลขคำสั่งซื้อยาวเกิน");
+    expect(r.rows[1].errors.join()).toContain("สูงผิดปกติ");
+    expect(r.rows[2].errors.join()).toContain("สูงผิดปกติ");
+    expect(r.rows[3].errors.join()).toContain("ช่องทางขายยาวเกิน");
+  });
+
+  it("ปฏิเสธไฟล์ที่มีแถวเกินขีดจำกัด", () => {
+    const rows = Array.from({ length: 20001 }, (_, i) => `O${i},2026-11-01,Shopee,TS-001,1,10,,,,,`);
+    const r = validateSalesCsv([HEADER, ...rows].join("\n"), opts());
+    expect(r.fileErrors[0]).toContain("เกินขีดจำกัด");
+    expect(r.rows).toEqual([]);
+  });
+});
+
+describe("CSV export: ป้องกัน formula injection", () => {
+  it("เติม ' หน้าข้อความที่ขึ้นต้นด้วยสัญลักษณ์สูตร แต่ไม่แก้ตัวเลข", () => {
+    expect(sanitizeCell("=HYPERLINK(\"http://x\")")).toBe("'=HYPERLINK(\"http://x\")");
+    expect(sanitizeCell("+1")).toBe("'+1");
+    expect(sanitizeCell("-cmd")).toBe("'-cmd");
+    expect(sanitizeCell("@SUM(A1)")).toBe("'@SUM(A1)");
+    expect(sanitizeCell("สินค้า A")).toBe("สินค้า A");
+    expect(sanitizeCell(-50)).toBe(-50);
+    const csv = toCsv([["name", "amount"], ["=1+1", -5]]);
+    expect(csv).toContain("'=1+1");
+    expect(csv).toContain("-5");
   });
 });

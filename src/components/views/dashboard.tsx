@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useMemo } from "react";
-import { AlertTriangle, ArrowRight, Coins, FlaskConical, Package, Percent, Receipt, TrendingUp, Upload, Wallet } from "lucide-react";
+import { AlertTriangle, ArrowRight, Coins, FlaskConical, Package, Percent, Receipt, ShieldCheck, TrendingUp, Upload, Wallet } from "lucide-react";
 import { buildCostLookup, dailySeries, filterByRange, lossProducts, summarize } from "@/lib/profit";
 import { formatBaht, formatNumber, formatPercent } from "@/lib/format";
 import { useData } from "../data-provider";
@@ -12,7 +12,7 @@ import { StatCard } from "../stat-card";
 import { Button, buttonClass, Card, EmptyState, Loading, PageHeader } from "../ui";
 
 export function DashboardView() {
-  const { ready, products, sales, expenses, range, dataset, startDemo } = useData();
+  const { ready, products, sales, expenses, range, dataset, startDemo, lastBackupAt, backupDue } = useData();
 
   const view = useMemo(() => {
     const s = filterByRange(sales, range);
@@ -57,6 +57,18 @@ export function DashboardView() {
     <>
       <PageHeader title="ภาพรวมร้านค้า" description={`${formatNumber(s.orderCount)} คำสั่งซื้อ · ${formatNumber(s.unitsSold)} ชิ้น`} />
       <RangeFilter />
+
+      {dataset === "real" && backupDue && (
+        <div className="mb-4 flex gap-3 rounded-2xl bg-brand-50 p-4 text-sm text-brand-900 ring-1 ring-brand-100">
+          <ShieldCheck size={18} className="mt-0.5 shrink-0" />
+          <p>
+            {lastBackupAt ? "ไม่ได้สำรองข้อมูลมากกว่า 7 วัน" : "ยังไม่เคยสำรองข้อมูล"} — ข้อมูลเก็บในเบราว์เซอร์นี้เท่านั้น{" "}
+            <Link href="/settings" className="font-medium underline">
+              สำรองข้อมูลตอนนี้
+            </Link>
+          </p>
+        </div>
+      )}
 
       {s.missingCostSkus.length > 0 && (
         <div className="mb-4 flex gap-3 rounded-2xl bg-amber-50 p-4 text-sm text-amber-900 ring-1 ring-amber-200">

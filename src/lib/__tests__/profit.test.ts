@@ -162,3 +162,45 @@ describe("dailySeries", () => {
     ]);
   });
 });
+
+describe("Historical Cost Snapshot", () => {
+  it("ใช้ต้นทุนที่บันทึกไว้กับรายการขาย แทนต้นทุนปัจจุบันของสินค้า", () => {
+    const l = calcLine(sale({ quantity: 2, unitPrice: 100, unitCost: 40 }), 70);
+    expect(l.unitCost).toBe(40);
+    expect(l.cogs).toBe(80);
+    expect(l.lineProfit).toBe(120);
+    expect(l.costMissing).toBe(false);
+  });
+
+  it("แก้ต้นทุนสินค้าภายหลัง กำไรย้อนหลังไม่เปลี่ยน", () => {
+    const sales = [sale({ id: "1", quantity: 3, unitPrice: 100, platformFee: 10, unitCost: 40 })];
+    const before = summarize(sales, [], buildCostLookup([product({ unitCost: 40 })]));
+    const after = summarize(sales, [], buildCostLookup([product({ unitCost: 999 })]));
+    expect(after).toEqual(before);
+    expect(after.cogs).toBe(120);
+    expect(after.netProfit).toBe(170);
+    expect(profitByProduct(sales, [product({ unitCost: 999 })])[0].profit).toBe(170);
+  });
+
+  it("รายการเก่าที่ไม่มี snapshot ยังใช้ต้นทุนปัจจุบัน (เข้ากันได้กับข้อมูลเดิม)", () => {
+    const legacy = sale({ quantity: 1, unitPrice: 100 });
+    expect(calcLine(legacy, 30).cogs).toBe(30);
+    expect(calcLine(legacy, 50).cogs).toBe(50);
+  });
+
+  it("snapshot ต้นทุน 0 ถือว่ามีต้นทุน (ไม่ fallback)", () => {
+    const l = calcLine(sale({ unitCost: 0 }), 70);
+    expect(l.cogs).toBe(0);
+    expect(l.costMissing).toBe(false);
+  });
+
+  it("รายการขายที่นำเข้าคนละช่วงใช้ต้นทุนของช่วงนั้น", () => {
+    const sales = [
+      sale({ id: "1", orderId: "O1", quantity: 1, unitPrice: 100, unitCost: 40 }),
+      sale({ id: "2", orderId: "O2", quantity: 1, unitPrice: 100, unitCost: 55 }),
+    ];
+    const s = summarize(sales, [], buildCostLookup([product({ unitCost: 60 })]));
+    expect(s.cogs).toBe(95);
+    expect(s.netProfit).toBe(105);
+  });
+});

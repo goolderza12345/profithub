@@ -35,6 +35,12 @@ export interface Sale {
   platformFee: number;
   /** ค่าขนส่งที่ร้านออกเองในคำสั่งซื้อนี้ */
   shippingFee: number;
+  /**
+   * ต้นทุนต่อชิ้น ณ เวลาที่นำเข้า (Historical Cost Snapshot)
+   * แก้ต้นทุนในหน้าสินค้าภายหลังจะไม่เปลี่ยนค่านี้ จึงไม่กระทบกำไรย้อนหลัง
+   * undefined = ข้อมูลเก่าก่อนมี snapshot (ระบบจะใช้ต้นทุนปัจจุบันแทน)
+   */
+  unitCost?: number;
   dedupeKey: string;
   batchId: string;
 }

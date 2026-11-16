@@ -27,7 +27,7 @@ const NAV = [
   { href: "/expenses", label: "ค่าใช้จ่าย", icon: Receipt },
   { href: "/reports", label: "รายงาน", icon: FileDown },
   { href: "/how-it-works", label: "วิธีคำนวณกำไร", icon: BookOpen },
-  { href: "/settings", label: "ตั้งค่าข้อมูล", icon: Settings },
+  { href: "/settings", label: "สำรองและตั้งค่า", icon: Settings },
 ];
 
 const BOTTOM = [
