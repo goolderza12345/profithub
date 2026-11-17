@@ -272,3 +272,69 @@ test("สถานะที่ระบบไม่รู้จัก ต้อ�
   await expect(page.getByTestId("order-notice")).toContainText("รอชำระ 1");
   await expect(page.locator("main")).toContainText("฿199.00");
 });
+
+test("รายงานการเงิน: แทนค่าธรรมเนียม ไม่นับซ้ำ แทนค่าใช้จ่ายที่กรอกเอง และกระทบยอดโอน", async ({ page }) => {
+  await seedProducts(page);
+  // ค่าใช้จ่ายที่กรอกเอง (ซ้ำกับค่าบริการรายเดือนในรายงาน)
+  await page.goto("/expenses");
+  await page.getByRole("button", { name: "เพิ่มค่าใช้จ่าย" }).first().click();
+  await page.locator('[role=dialog] input[type=date]').fill("2026-11-16");
+  await page.getByPlaceholder("0.00").fill("99");
+  await page.locator("[role=dialog] select").first().selectOption("platform_fee");
+  await page.locator("[role=dialog] select").nth(1).selectOption("Shopee");
+  await page.getByPlaceholder("เช่น Shopee Ads สัปดาห์ที่ 1").fill("ค่าบริการกรอกเอง");
+  await page.getByRole("button", { name: "บันทึก" }).click();
+  await expect(page.getByText("ค่าบริการกรอกเอง")).toBeVisible();
+
+  await upload(page, "orders-v2-completed-refund.csv");
+  await page.getByRole("button", { name: "ตรวจสอบข้อมูล" }).click();
+  await page.getByRole("button", { name: "บันทึก 2 คำสั่งซื้อ" }).click();
+  await page.getByRole("dialog", { name: "ยืนยันการบันทึก" }).getByRole("button", { name: "บันทึก 2 คำสั่งซื้อ" }).click();
+  await expect(page.getByTestId("import-summary")).toBeVisible();
+
+  const importSettlement = async (file: string) => {
+    await page.goto("/import");
+    await page.getByRole("button", { name: "รายงานการเงิน" }).click();
+    await page.getByLabel("ช่องทางของรายงาน").selectOption("Shopee");
+    await page.setInputFiles("#settlement-file", FX(file));
+    await page.getByRole("button", { name: "ตรวจสอบรายงาน" }).click();
+  };
+
+  await importSettlement("settlement-r1.csv");
+  expect(await counts(page, "settlement-counts")).toMatchObject({ รายการใหม่: 7 });
+  await page.getByLabel(/ค่าบริการกรอกเอง/).check();
+  await noHorizontalOverflow(page);
+  await page.getByRole("button", { name: "บันทึกรายงาน" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "บันทึกรายงาน" }).click();
+  await expect(page.getByTestId("settlement-summary")).toContainText("คำนวณค่าธรรมเนียมใหม่ 2 คำสั่งซื้อ");
+
+  // ORD-1 = 378 − 100 − 170 − (23 − 5) = 90 · ORD-2 = 250 − 95 − 14 = 141 · ค่าบริการ 99 นับครั้งเดียว → 132
+  await page.goto("/");
+  await expect(page.locator("main")).toContainText("฿132.00");
+
+  // รายงานเดิมซ้ำ → บันทึกไม่ได้
+  await importSettlement("settlement-r1.csv");
+  await expect(page.getByText("ไฟล์นี้เคยนำเข้าแล้ว — บันทึกซ้ำไม่ได้")).toBeVisible();
+  await expect(page.getByRole("button", { name: "บันทึกรายงาน" })).toBeDisabled();
+
+  // รายงานช่วงเวลาซ้อนกัน: ORD-2 ไม่นับซ้ำ มีเพียงค่าคอมมิชชันปรับเพิ่มของ ORD-1
+  await importSettlement("settlement-r2-overlap.csv");
+  expect(await counts(page, "settlement-counts")).toMatchObject({ รายการใหม่: 1, "มีอยู่แล้ว (ไม่นับซ้ำ)": 3 });
+  await page.getByRole("button", { name: "บันทึกรายงาน" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "บันทึกรายงาน" }).click();
+  await expect(page.getByTestId("settlement-summary")).toBeVisible();
+  await page.goto("/");
+  await expect(page.locator("main")).toContainText("฿130.50");
+
+  // กระทบยอดโอน: ORD-1 คาดไว้ 258.50 แต่รายงานแจ้ง 255
+  await page.goto("/orders");
+  await page.getByRole("button", { name: /ยอดโอนไม่ตรง 1/ }).click();
+  await page.locator('button[data-order="ORD-1"]').click();
+  await expect(page.getByTestId("payout-mismatch")).toContainText("ต่าง");
+  await expect(page.getByTestId("order-history")).toContainText("รายงานการเงิน");
+
+  // ค่าใช้จ่ายที่กรอกเองถูกแทน (ไม่ลบ)
+  await page.goto("/expenses");
+  await expect(page.getByText("ใช้รายงานการเงินแทน (ไม่นับ)")).toBeVisible();
+  await expect(page.getByText("จากรายงานการเงิน")).toBeVisible();
+});

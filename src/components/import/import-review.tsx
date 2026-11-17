@@ -14,6 +14,7 @@ import type { ColumnMapping, MappingOptions } from "@/lib/import/mapping";
 import type { SourceFile, Table } from "@/lib/import/table";
 import { decisionErrors, validateImport, type ImportPreview, type ImportRowStatus, type SkuDecision } from "@/lib/import/validate";
 import { buildOrderPlan, changeLabel, PLAN_LABELS, type OrderPlan, type PlanKind } from "@/lib/orders/plan";
+import { settlementFeesFor } from "@/lib/orders/settlement";
 import { STATUS_LABELS } from "@/lib/orders/status";
 import { ORDER_STATUSES, type OrderStatus } from "@/lib/orders/types";
 import { OPTIONAL_FIELD_LABELS } from "@/lib/types";
@@ -70,7 +71,7 @@ function problemRowsCsv(preview: ImportPreview, table: Table): string {
 }
 
 export function ImportReview({ source, table, adapterId, mapping, options, onOptionsChange, onBack, onRestart, onFinished }: Props) {
-  const { products, skuAliases, sales, orders, batches, applyOrderPlan } = useData();
+  const { products, skuAliases, sales, orders, batches, settlementEntries, applyOrderPlan } = useData();
   const [decisions, setDecisions] = useState<Record<string, SkuDecision>>({});
   const [statusDecisions, setStatusDecisions] = useState<Record<string, OrderStatus>>({});
   const [newForms, setNewForms] = useState<Record<string, { name: string; cost: string }>>({});
@@ -100,8 +101,10 @@ export function ImportReview({ source, table, adapterId, mapping, options, onOpt
         sales,
         batchId: "pending",
         now: new Date().toISOString(),
+        // ค่าธรรมเนียมจากรายงานการเงินที่นำเข้าแล้ว มีลำดับเหนือไฟล์คำสั่งซื้อ (กันหักซ้ำ/ถูกเขียนทับ)
+        settlementFees: (o) => settlementFeesFor(o, settlementEntries),
       }),
-    [preview, orders, sales],
+    [preview, orders, sales, settlementEntries],
   );
   const planned = plan.orders.map((p) => (p.kind === "conflict" ? { ...p, apply: !!conflictApply[p.key] } : p));
   const toApply = planned.filter((p) => p.apply && p.applicable);

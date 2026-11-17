@@ -2,7 +2,17 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import * as store from "@/lib/db";
-import type { ExpenseInput, ImportExtras, ImportOutcome, OrderImportOutcome, ProductInput, RestorePointInfo, Snapshot } from "@/lib/db";
+import type {
+  ExpenseInput,
+  ImportExtras,
+  ImportOutcome,
+  OrderImportOutcome,
+  ProductInput,
+  RestorePointInfo,
+  SettlementApplyInput,
+  SettlementOutcome,
+  Snapshot,
+} from "@/lib/db";
 import type { PlannedOrder } from "@/lib/orders/plan";
 import { selectRecognizedSales, type RecognitionResult } from "@/lib/orders/recognition";
 import type { Order, OrderRevision, SettlementEntry, SettlementReport } from "@/lib/orders/types";
@@ -37,6 +47,7 @@ interface DataContextValue extends Omit<Snapshot, "skuAliases" | "orders" | "ord
   /** ค่าใช้จ่ายที่นับ (ไม่รวมรายการที่ถูกแทนด้วยรายงานการเงิน) */
   activeExpenses: Expense[];
   applyOrderPlan: (planned: PlannedOrder[], fileName: string, extras?: Omit<ImportExtras, "restorePoint">) => Promise<OrderImportOutcome>;
+  applySettlement: (input: SettlementApplyInput) => Promise<SettlementOutcome>;
   ready: boolean;
   error: string | null;
   dataset: DatasetId;
@@ -256,6 +267,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
     },
     activeExpenses,
     applyOrderPlan: mutate(store.applyOrderPlan),
+    applySettlement: mutate(store.applySettlement),
     ready,
     error,
     dataset,

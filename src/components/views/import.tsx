@@ -7,12 +7,14 @@ import { downloadText } from "@/lib/download";
 import { formatNumber } from "@/lib/format";
 import { ImportWizard } from "../import/import-wizard";
 import { useData } from "../data-provider";
-import { Button, Card, ConfirmDialog, Loading, PageHeader } from "../ui";
+import { SettlementImport } from "../import/settlement-import";
+import { Button, Card, ConfirmDialog, Loading, PageHeader, Segmented } from "../ui";
 
 export function ImportView() {
   const { ready, batches, deleteBatch, dataset } = useData();
   const [batchToDelete, setBatchToDelete] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [mode, setMode] = useState<"orders" | "settlement">("orders");
 
   if (!ready) return <Loading />;
 
@@ -31,7 +33,17 @@ export function ImportView() {
 
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="lg:col-span-2">
-          <ImportWizard />
+          <div className="mb-4">
+            <Segmented<"orders" | "settlement">
+              value={mode}
+              onChange={setMode}
+              options={[
+                { value: "orders", label: "ไฟล์คำสั่งซื้อ" },
+                { value: "settlement", label: "รายงานการเงิน" },
+              ]}
+            />
+          </div>
+          {mode === "orders" ? <ImportWizard /> : <SettlementImport />}
         </div>
 
         <div className="space-y-4">

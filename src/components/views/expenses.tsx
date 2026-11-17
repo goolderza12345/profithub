@@ -22,7 +22,8 @@ export function ExpensesView() {
   const inRange = useMemo(() => filterByRange(expenses, range).sort((a, b) => b.date.localeCompare(a.date)), [expenses, range]);
   const totals = useMemo(() => {
     const t = Object.fromEntries(EXPENSE_CATEGORIES.map((c) => [c, 0])) as Record<ExpenseCategory, number>;
-    for (const e of inRange) t[e.category] = round2(t[e.category] + e.amount);
+    // ค่าใช้จ่ายที่ถูกแทนด้วยรายงานการเงินไม่นับ (กันหักซ้ำ)
+    for (const e of inRange) if (!e.supersededBy) t[e.category] = round2(t[e.category] + e.amount);
     return t;
   }, [inRange]);
   const salesInRange = useMemo(() => filterByRange(sales, range), [sales, range]);
@@ -106,11 +107,16 @@ export function ExpensesView() {
                   <div className="flex flex-wrap items-center gap-1.5">
                     <Badge tone="brand">{EXPENSE_LABELS[e.category]}</Badge>
                     <Badge>{e.channel || "ทุกช่องทาง"}</Badge>
+                    {e.source && <Badge tone="green">จากรายงานการเงิน</Badge>}
+                    {e.supersededBy && <Badge tone="amber">ใช้รายงานการเงินแทน (ไม่นับ)</Badge>}
                   </div>
                   <p className="mt-1 truncate text-sm text-slate-800">{e.note || "—"}</p>
                   <p className="text-xs text-slate-500">{formatThaiDate(e.date)}</p>
                 </div>
-                <p className="num shrink-0 font-semibold text-slate-900">{formatBaht(e.amount)}</p>
+                <p className={`num shrink-0 font-semibold ${e.supersededBy ? "text-slate-400 line-through" : "text-slate-900"}`}>{formatBaht(e.amount)}</p>
+                {e.source ? (
+                  <span className="w-9 shrink-0 text-center text-[10px] text-slate-400">อ่านอย่างเดียว</span>
+                ) : (
                 <div className="flex shrink-0 flex-col gap-1 sm:flex-row">
                   <Button size="sm" variant="ghost" onClick={() => setEditing(e)} aria-label="แก้ไข">
                     <Pencil size={15} />
@@ -119,6 +125,7 @@ export function ExpensesView() {
                     <Trash2 size={15} />
                   </Button>
                 </div>
+                )}
               </li>
             ))}
           </ul>

@@ -90,3 +90,19 @@ with open(path("orders-unknown-status.csv"), "w", encoding="utf-8", newline="") 
     f.write("order_id,order_date,channel,sku,quantity,unit_price,order_status\n"
             "UNK-1,2026-11-12,Shopee,TS-001,1,199,To Ship\n"
             "UNK-2,2026-11-12,Shopee,TS-001,1,199,Unpaid\n")
+
+# 9) Phase 3: รายงานการเงินรูปแบบ ProfitHub (ข้อมูลสมมติ) — รายงานแรก / รายงานช่วงเวลาซ้อนกัน
+SET_HEAD = "order_id,date,entry_id,commission_fee,transaction_fee,service_fee,shipping_fee,other_fee,fee_refund,payout,description"
+def write_settlement(name, lines):
+    with open(path(name), "w", encoding="utf-8", newline="") as f:
+        f.write("\n".join([SET_HEAD] + lines) + "\n")
+
+write_settlement("settlement-r1.csv", [
+    "ORD-1,2026-11-15,S1,20,3,,,,,255,",
+    "ORD-2,2026-11-15,S2,12,2,,,,,236,",
+    ",2026-11-16,M1,,,99,,,,,ค่าบริการรายเดือน",
+])
+write_settlement("settlement-r2-overlap.csv", [
+    "ORD-2,2026-11-15,S2,12,2,,,,,236,",
+    "ORD-1,2026-11-16,S4,1.50,,,,,,,ปรับค่าคอมมิชชันย้อนหลัง",
+])

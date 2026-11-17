@@ -4,6 +4,8 @@ import { newId } from "./id";
 import type { DatasetId, Expense, ImportBatch, Product, Sale, SkuAlias } from "./types";
 import type { Order, OrderRevision, SettlementEntry, SettlementReport } from "./orders/types";
 import type { PlannedOrder } from "./orders/plan";
+import { projectLine } from "./orders/project";
+import { expenseFromEntry, settlementFeesFor, type SettlementPlan } from "./orders/settlement";
 
 export interface Snapshot {
   products: Product[];
@@ -615,4 +617,140 @@ export async function saveExpense(dataset: DatasetId, input: ExpenseInput, id?: 
 export async function deleteExpense(dataset: DatasetId, id: string): Promise<void> {
   const db = await getDB(dataset);
   await db.delete("expenses", id);
+}
+
+export interface SettlementApplyInput {
+  report: { id: string; adapterId: string; fileName: string; fileHash: string; periodFrom?: string; periodTo?: string };
+  plan: SettlementPlan;
+  channel: string;
+  /** ค่าใช้จ่ายที่กรอกเองซึ่งผู้ใช้เลือกให้ใช้รายงานแทน (จะไม่ถูกนับ แต่ไม่ลบ) */
+  supersedeExpenseIds?: string[];
+}
+
+export interface SettlementOutcome {
+  entriesAdded: number;
+  entriesRevised: number;
+  entriesAlreadyCounted: number;
+  ordersRecomputed: number;
+  ordersPending: number;
+  expensesCreated: number;
+  expensesSuperseded: number;
+  restorePointCreated: boolean;
+}
+
+export const SETTLEMENT_DUPLICATE_FILE = "ไฟล์รายงานการเงินนี้เคยนำเข้าแล้ว — ไม่มีข้อมูลใดถูกบันทึก";
+
+/**
+ * บันทึกรายงานการเงินใน transaction เดียว (all-or-nothing) พร้อมจุดกู้คืน
+ * และคำนวณค่าธรรมเนียมของคำสั่งซื้อที่เกี่ยวข้องใหม่ (ต้นทุน ณ วันนำเข้าไม่เปลี่ยน) พร้อมเก็บประวัติ
+ */
+export async function applySettlement(dataset: DatasetId, input: SettlementApplyInput): Promise<SettlementOutcome> {
+  const db = await getDB(dataset);
+  const now = new Date().toISOString();
+  const out: SettlementOutcome = {
+    entriesAdded: 0,
+    entriesRevised: 0,
+    entriesAlreadyCounted: 0,
+    ordersRecomputed: 0,
+    ordersPending: 0,
+    expensesCreated: 0,
+    expensesSuperseded: 0,
+    restorePointCreated: false,
+  };
+  const { plan, report } = input;
+  const tx = db.transaction(ALL_STORES, "readwrite") as RWTx;
+  try {
+    if (await tx.objectStore("settlementReports").index("fileHash").getKey(report.fileHash)) throw new Error(SETTLEMENT_DUPLICATE_FILE);
+    out.restorePointCreated = await addRestorePoint(tx, `ก่อนนำเข้ารายงานการเงิน "${report.fileName}"`);
+    const entries = tx.objectStore("settlementEntries");
+    const expenses = tx.objectStore("expenses");
+    await tx.objectStore("settlementReports").add({
+      ...report,
+      fileName: report.fileName.slice(0, 255),
+      importedAt: now,
+      entryCount: plan.newEntries.length + plan.revised.length + plan.alreadyCounted.length,
+    });
+    const affected = new Set(plan.affectedOrders);
+    for (const e of plan.newEntries) {
+      if (await entries.getKey(e.entryKey)) throw new Error(STALE_PLAN_MESSAGE);
+      await entries.add({ ...e, reportIds: [report.id] });
+      out.entriesAdded++;
+    }
+    for (const e of plan.alreadyCounted) {
+      const cur = await entries.get(e.entryKey);
+      if (!cur) throw new Error(STALE_PLAN_MESSAGE);
+      await entries.put({ ...cur, reportIds: [...new Set([...cur.reportIds, report.id])] });
+      out.entriesAlreadyCounted++;
+    }
+    for (const { before, after } of plan.revised) {
+      const cur = await entries.get(before.entryKey);
+      if (!cur || cur.amount !== before.amount) throw new Error(STALE_PLAN_MESSAGE);
+      if (cur.orderKey) affected.add(cur.orderKey);
+      await entries.put({
+        ...cur,
+        ...(after.orderKey ? { orderKey: after.orderKey } : {}),
+        amount: after.amount,
+        occurredAt: after.occurredAt,
+        description: after.description,
+        reportIds: [...new Set([...cur.reportIds, report.id])],
+        history: [...(cur.history ?? []), { amount: cur.amount, reportId: cur.reportIds[cur.reportIds.length - 1] }],
+      });
+      out.entriesRevised++;
+    }
+    // รายการที่ไม่มีเลขคำสั่งซื้อ → ค่าใช้จ่ายระดับร้าน (อ่านอย่างเดียว)
+    const firstByCategory = new Map<string, string>();
+    for (const e of plan.unassigned) {
+      const exp = expenseFromEntry(e, input.channel, now);
+      const id = `stl:${e.entryKey}`;
+      if (exp) {
+        await expenses.put(exp);
+        out.expensesCreated++;
+        if (!firstByCategory.has(exp.category)) firstByCategory.set(exp.category, e.entryKey);
+      } else if (await expenses.get(id)) {
+        await expenses.delete(id);
+      }
+    }
+    for (const id of input.supersedeExpenseIds ?? []) {
+      const x = await expenses.get(id);
+      if (!x || x.source || x.supersededBy) throw new Error(STALE_PLAN_MESSAGE);
+      const by = firstByCategory.get(x.category);
+      if (!by) throw new Error("ไม่มีรายการในรายงานการเงินที่ใช้แทนค่าใช้จ่ายประเภทนี้");
+      await expenses.put({ ...x, supersededBy: by });
+      out.expensesSuperseded++;
+    }
+    // คำนวณค่าธรรมเนียมของคำสั่งซื้อที่เกี่ยวข้องใหม่
+    for (const key of affected) {
+      const order = await tx.objectStore("orders").get(key);
+      if (!order) {
+        out.ordersPending++;
+        continue;
+      }
+      const own = await entries.index("orderKey").getAll(key);
+      const sf = settlementFeesFor(order, own);
+      const changes: { path: string; from: unknown; to: unknown }[] = [];
+      for (const [i, line] of order.lines.entries()) {
+        const sale = await tx.objectStore("sales").get(line.saleId);
+        if (!sale) throw new Error(STALE_PLAN_MESSAGE);
+        const p = projectLine(line, order, sf?.perLine[i] ?? line.fees, !!sf?.final, !!sf?.replacesLineFeeRefund);
+        const next = { ...sale, platformFee: p.platformFee, shippingFee: p.shippingFee, estimateReasons: p.estimateReasons, estimateUpside: p.estimateUpside };
+        for (const f of ["platformFee", "shippingFee"] as const) {
+          if (sale[f] !== next[f]) changes.push({ path: `${line.lineKey}.${f}`, from: sale[f], to: next[f] });
+        }
+        await tx.objectStore("sales").put(next);
+      }
+      await tx.objectStore("orders").put({ ...order, revisionCount: order.revisionCount + 1, updatedAt: now });
+      await tx.objectStore("orderRevisions").add({ orderKey: key, batchId: report.id, appliedAt: now, kind: "settlement", changes });
+      out.ordersRecomputed++;
+    }
+    await tx.done;
+    return out;
+  } catch (e) {
+    try {
+      tx.abort();
+    } catch {
+      /* ถูกยกเลิกแล้ว */
+    }
+    await tx.done.catch(() => undefined);
+    throw e;
+  }
 }

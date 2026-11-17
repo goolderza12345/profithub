@@ -7,17 +7,19 @@ import { formatThaiDate } from "@/lib/dates";
 import { formatBaht, formatNumber } from "@/lib/format";
 import { toBaht } from "@/lib/money/satang";
 import { changeLabel } from "@/lib/orders/plan";
+import { reconcile } from "@/lib/orders/settlement";
 import { recognitionOf, STATUS_LABELS } from "@/lib/orders/status";
 import type { Order } from "@/lib/orders/types";
 import { useData } from "../data-provider";
 import { Badge, buttonClass, Card, cn, EmptyState, inputClass, Loading, Modal, PageHeader, Segmented } from "../ui";
 
-type Filter = "all" | "counted" | "excluded" | "provisional" | "cancelledLines";
+type Filter = "all" | "counted" | "excluded" | "provisional" | "cancelledLines" | "mismatch";
 
 const REC_TONE = { excluded: "red", provisional: "amber", final: "green", unspecified: "slate" } as const;
 
 export function OrdersView() {
-  const { ready, orders, orderRevisions } = useData();
+  const { ready, orders, orderRevisions, settlementEntries } = useData();
+  const mismatches = useMemo(() => new Map(reconcile(orders, settlementEntries).map((r) => [r.orderKey, r])), [orders, settlementEntries]);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState<Order | null>(null);
@@ -31,10 +33,11 @@ export function OrdersView() {
         if (filter === "excluded" && rec !== "excluded") return false;
         if (filter === "provisional" && rec !== "provisional") return false;
         if (filter === "cancelledLines" && !o.lines.some((l) => l.cancelled)) return false;
+        if (filter === "mismatch" && !mismatches.has(o.key)) return false;
         return !q || o.orderId.toLowerCase().includes(q) || o.lines.some((l) => l.sourceSku.toLowerCase().includes(q));
       })
       .sort((a, b) => b.orderDate.localeCompare(a.orderDate) || a.orderId.localeCompare(b.orderId));
-  }, [orders, filter, query]);
+  }, [orders, filter, query, mismatches]);
 
   if (!ready) return <Loading />;
   if (orders.length === 0) {
@@ -73,6 +76,7 @@ export function OrdersView() {
           { value: "provisional", label: "ยังไม่สำเร็จ" },
           { value: "excluded", label: "รอชำระ/ยกเลิก" },
           { value: "cancelledLines", label: "มีบรรทัดยกเลิก" },
+          { value: "mismatch", label: `ยอดโอนไม่ตรง ${mismatches.size}` },
         ]}
       />
       <p className="mb-2 mt-3 text-sm text-slate-500">{formatNumber(list.length)} คำสั่งซื้อ</p>
@@ -90,7 +94,10 @@ export function OrdersView() {
                       {o.revisionCount > 1 && ` · อัปเดต ${o.revisionCount - 1} ครั้ง`}
                     </p>
                   </div>
-                  <Badge tone={REC_TONE[rec]}>{STATUS_LABELS[o.status]}</Badge>
+                  <span className="flex shrink-0 flex-col items-end gap-1">
+                    <Badge tone={REC_TONE[rec]}>{STATUS_LABELS[o.status]}</Badge>
+                    {mismatches.has(o.key) && <Badge tone="red">ยอดโอนไม่ตรง</Badge>}
+                  </span>
                 </button>
               </li>
             );
@@ -107,6 +114,12 @@ export function OrdersView() {
               {formatThaiDate(open.orderDate)} · {open.channel} · สถานะ <b>{STATUS_LABELS[open.status]}</b>
               {open.rawStatus && open.status !== "unspecified" && <span className="text-xs text-slate-400"> (ในไฟล์: {open.rawStatus})</span>}
             </p>
+            {mismatches.get(open.key) && (
+              <p className="num rounded-xl bg-rose-50 p-3 text-xs text-rose-800" data-testid="payout-mismatch">
+                ยอดโอนที่คาดไว้ {formatBaht(toBaht(mismatches.get(open.key)!.expected))} · ยอดโอนจริงในรายงาน {formatBaht(toBaht(mismatches.get(open.key)!.actual))} · ต่าง{" "}
+                {formatBaht(toBaht(mismatches.get(open.key)!.diff))} — ตรวจสอบส่วนลด เงินคืน หรือค่าธรรมเนียมที่อาจขาดหาย
+              </p>
+            )}
             <ul className="space-y-2">
               {open.lines.map((l) => (
                 <li key={l.lineKey} className={cn("rounded-xl p-3 ring-1 ring-slate-200", l.cancelled && "opacity-60")}>

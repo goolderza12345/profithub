@@ -46,12 +46,19 @@ export function lineFactErrors(l: OrderLine): string[] {
  * @param fees ค่าธรรมเนียมที่ใช้คำนวณ (จากรายงานการเงินถ้ามี มิฉะนั้นจากไฟล์คำสั่งซื้อ)
  * @param feesFinal ค่าธรรมเนียมมาจากรายงานการเงิน (ถือเป็นยอดสุดท้าย)
  */
-export function projectLine(l: OrderLine, order: Pick<Order, "status">, fees: FeeBreakdown = l.fees, feesFinal = false): ProjectedSale {
+export function projectLine(
+  l: OrderLine,
+  order: Pick<Order, "status">,
+  fees: FeeBreakdown = l.fees,
+  feesFinal = false,
+  /** รายงานการเงินมีค่าธรรมเนียมที่ได้คืนแล้ว → ไม่หักค่าที่ได้คืนจากไฟล์คำสั่งซื้อซ้ำ */
+  ignoreLineFeeRefund = false,
+): ProjectedSale {
   const reasons: EstimateReason[] = [];
   if (l.unknownDiscount > 0) reasons.push("unknown_discount_funding");
   if (l.refundUnknown > 0) reasons.push("unknown_refund_funding");
   if (recognitionOf(order.status) === "provisional" && !feesFinal) reasons.push("provisional_status");
-  const platformFee = fees.commission + fees.transaction + fees.service + fees.other - l.feeRefunded;
+  const platformFee = fees.commission + fees.transaction + fees.service + fees.other - (ignoreLineFeeRefund ? 0 : l.feeRefunded);
   const shippingFee = fees.shipping - l.shippingRefunded + l.returnShippingCost;
   return {
     discount: toBaht(l.sellerDiscount + l.unknownDiscount),

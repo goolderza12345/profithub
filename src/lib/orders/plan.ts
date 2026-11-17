@@ -18,7 +18,8 @@ import type { OptionalSaleField, Sale } from "../types";
 import { assignLineKeys, matchLines, type IdentityStrength, type MatchLine } from "./identity";
 import { factsForHash, projectLine } from "./project";
 import { checkTransition, STATUS_LABELS } from "./status";
-import { emptyFees, type FeeBreakdown, type Order, type OrderLine, type OrderStatusValue, type RevisionKind } from "./types";
+import type { SettlementFees } from "./settlement";
+import { emptyFees, type Order, type OrderLine, type OrderStatusValue, type RevisionKind } from "./types";
 
 /** บรรทัดที่ผ่านการตรวจแล้วจากไฟล์ (ไม่ขึ้นกับรูปแบบไฟล์) */
 export interface IncomingLine {
@@ -74,7 +75,7 @@ export interface PlanContext {
   batchId: string;
   now: string;
   /** ค่าธรรมเนียมจากรายงานการเงิน (ปันส่วนต่อบรรทัดแล้ว) ถ้ามี */
-  settlementFees?: (order: Order) => FeeBreakdown[] | null;
+  settlementFees?: (order: Order) => SettlementFees | null;
 }
 
 export const orderKeyOf = (channel: string, orderId: string) => `${channel.trim().toLowerCase()}|${orderId.trim()}`;
@@ -195,8 +196,8 @@ export function buildOrderPlan(incoming: IncomingLine[], ctx: PlanContext): Orde
       sales: [],
     };
 
-    const saleFor = (l: IncomingLine, line: OrderLine, base: Sale | null, order: Order, feeOverride?: FeeBreakdown): Sale => {
-      const p = projectLine(line, order, feeOverride ?? line.fees, !!feeOverride);
+    const saleFor = (l: IncomingLine, line: OrderLine, base: Sale | null, order: Order, sf?: SettlementFees | null, idx = 0): Sale => {
+      const p = projectLine(line, order, sf?.perLine[idx] ?? line.fees, !!sf?.final, !!sf?.replacesLineFeeRefund);
       const s: Sale = {
         id: base?.id ?? `new:${++newId}`,
         orderId: order.orderId,
@@ -238,7 +239,7 @@ export function buildOrderPlan(incoming: IncomingLine[], ctx: PlanContext): Orde
       plan.kind = "new";
       const fees = ctx.settlementFees?.(incomingOrder) ?? null;
       incomingOrder.lines.forEach((line, i) => {
-        const s = saleFor(lines[i], line, null, incomingOrder, fees?.[i]);
+        const s = saleFor(lines[i], line, null, incomingOrder, fees, i);
         line.saleId = s.id;
         plan.sales.push(s);
       });
@@ -314,7 +315,7 @@ export function buildOrderPlan(incoming: IncomingLine[], ctx: PlanContext): Orde
         handledIncoming.add(b);
         const base = salesById.get(before.saleIds[a]) ?? null;
         const line: OrderLine = { ...incomingOrder.lines[b], saleId: before.saleIds[a] };
-        const s = saleFor(lines[b], line, base, incomingOrder, fees?.[b]);
+        const s = saleFor(lines[b], line, base, incomingOrder, fees, b);
         diff(base, s, line.lineKey);
         resultLines.push(line);
         plan.sales.push(s);
@@ -322,7 +323,7 @@ export function buildOrderPlan(incoming: IncomingLine[], ctx: PlanContext): Orde
       for (const b of m.added) {
         handledIncoming.add(b);
         const line: OrderLine = { ...incomingOrder.lines[b], saleId: "" };
-        const s = saleFor(lines[b], line, null, incomingOrder, fees?.[b]);
+        const s = saleFor(lines[b], line, null, incomingOrder, fees, b);
         line.saleId = s.id;
         plan.changes.push({ lineKey: line.lineKey, field: "เพิ่มบรรทัด", from: null, to: `${line.sourceSku} × ${line.quantity}` });
         resultLines.push(line);
