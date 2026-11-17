@@ -56,7 +56,7 @@ export function AnalysisView() {
       label: `หัก ${EXPENSE_LABELS[c]} (บันทึกเอง)`,
       value: -val,
     })),
-    { label: "กำไรสุทธิ", value: s.netProfit, kind: "net" },
+    { label: s.isEstimate ? "กำไรสุทธิ (โดยประมาณ)" : "กำไรสุทธิ", value: s.netProfit, kind: "net" },
   ];
 
   return (

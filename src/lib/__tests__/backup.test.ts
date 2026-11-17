@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { checksum } from "../checksum";
 import { backupFileName, createBackup, parseBackup, serializeBackup, BACKUP_SCHEMA_VERSION } from "../backup";
 import { generateDemoData } from "../demo";
 import type { Snapshot } from "../db";
@@ -25,8 +26,9 @@ describe("backup: สร้างและกู้คืน", () => {
     const r = parseBackup(text(), "real");
     expect(r.ok).toBe(true);
     expect(r.errors).toEqual([]);
-    expect(r.backup!.data).toEqual(realData());
-    expect(r.backup!.counts).toEqual({ products: 1, sales: 1, expenses: 1, batches: 1 });
+    // v1.2: ไฟล์ Backup มี skuAliases เพิ่ม (schema 2)
+    expect(r.backup!.data).toEqual({ ...realData(), skuAliases: [] });
+    expect(r.backup!.counts).toEqual({ products: 1, sales: 1, expenses: 1, batches: 1, skuAliases: 0 });
     expect(r.backup!.schemaVersion).toBe(BACKUP_SCHEMA_VERSION);
   });
 
@@ -139,5 +141,49 @@ describe("backup: checksum ครอบคลุมชุดข้อมูล",
     const r = parseBackup(JSON.stringify(f), "real");
     expect(r.ok).toBe(false);
     expect(r.errors[0]).toContain("checksum");
+  });
+});
+
+describe("backup v1.2 (schema 2)", () => {
+  const withAlias = (): Snapshot => ({
+    ...realData(),
+    sales: [sale({ id: "s1", sku: "A", sourceSku: "SHP-A", unitCost: 40, missingFields: ["refund"], dedupeKey: "shopee|O1|SHP-A", batchId: "b1" })],
+    skuAliases: [{ alias: "SHP-A", productId: "p1", createdAt: NOW }],
+  });
+
+  it("เก็บการจับคู่ SKU และช่องที่ไม่มีข้อมูลไว้ในไฟล์ และกู้คืนได้ครบ", () => {
+    const r = parseBackup(text(withAlias()), "real");
+    expect(r.ok).toBe(true);
+    expect(r.backup!.data.skuAliases).toEqual(withAlias().skuAliases);
+    expect(r.backup!.data.sales[0].missingFields).toEqual(["refund"]);
+  });
+
+  it("ยังกู้คืนไฟล์ schema 1 (v1.1) ได้ โดยถือว่าไม่มีการจับคู่ SKU", () => {
+    // จำลองไฟล์ที่สร้างจาก v1.1: ไม่มี skuAliases และ checksum คำนวณจากข้อมูลชุดนั้น
+    const data = realData();
+    const v11 = {
+      kind: "profithub-backup",
+      schemaVersion: 1,
+      app: "ProfitHub",
+      dataset: "real",
+      exportedAt: NOW,
+      counts: { products: 1, sales: 1, expenses: 1, batches: 1 },
+      checksum: checksum(JSON.stringify({ dataset: "real", data })),
+      data,
+    };
+    const r = parseBackup(JSON.stringify(v11), "real");
+    expect(r.errors).toEqual([]);
+    expect(r.ok).toBe(true);
+    expect(r.backup!.data.skuAliases).toEqual([]);
+    expect(r.backup!.data.products).toEqual(data.products);
+  });
+
+  it("ปฏิเสธการจับคู่ SKU ที่ชี้ไปยังสินค้าที่ไม่มี และ missingFields ที่ผิด", () => {
+    const bad = withAlias();
+    bad.skuAliases = [{ alias: "SHP-A", productId: "ghost", createdAt: NOW }];
+    expect(parseBackup(text(bad), "real").errors.join()).toContain("ชี้ไปยังสินค้าที่ไม่มี");
+    const bad2 = withAlias();
+    (bad2.sales[0] as { missingFields: string[] }).missingFields = ["bogus"];
+    expect(parseBackup(text(bad2), "real").errors.join()).toContain("missingFields");
   });
 });

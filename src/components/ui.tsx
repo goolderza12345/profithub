@@ -98,6 +98,7 @@ export function ConfirmDialog({
   onConfirm,
   onClose,
   error,
+  tone = "danger",
 }: {
   open: boolean;
   title: string;
@@ -106,6 +107,8 @@ export function ConfirmDialog({
   onConfirm: () => void;
   onClose: () => void;
   error?: string | null;
+  /** สีปุ่มยืนยัน: danger สำหรับการลบ, primary สำหรับการบันทึก */
+  tone?: "danger" | "primary";
 }) {
   return (
     <Modal open={open} onClose={onClose} title={title}>
@@ -115,7 +118,7 @@ export function ConfirmDialog({
         <Button variant="secondary" onClick={onClose}>
           ยกเลิก
         </Button>
-        <Button variant="danger" onClick={onConfirm}>
+        <Button variant={tone} onClick={onConfirm}>
           {confirmLabel}
         </Button>
       </div>

@@ -1,7 +1,11 @@
 import Papa from "papaparse";
-import { toISODate } from "./dates";
 import type { Sale } from "./types";
-import { LIMITS, validateSku } from "./validation";
+import { validateSku } from "./validation";
+import { genericAdapter } from "./import/adapters/generic";
+import { TEMPLATE_HEADERS, type ImportFieldKey } from "./import/fields";
+import { defaultOptions, suggestMapping, type ColumnMapping } from "./import/mapping";
+import { buildTable, csvToSheet } from "./import/table";
+import { validateImport } from "./import/validate";
 
 /** คอลัมน์ของไฟล์นำเข้ายอดขาย */
 export const SALES_COLUMNS = [
@@ -51,58 +55,7 @@ export const SAMPLE_CSV = [
   "TTS-2611-0003,2026-11-03,TikTok Shop,MUG-002,3,240,30,240,1,36,0",
 ].join("\n");
 
-const KNOWN_CHANNELS: Record<string, string> = {
-  shopee: "Shopee",
-  lazada: "Lazada",
-  tiktok: "TikTok Shop",
-  "tiktok shop": "TikTok Shop",
-  tiktokshop: "TikTok Shop",
-  line: "LINE",
-  "line shopping": "LINE",
-  "line oa": "LINE",
-  facebook: "Facebook",
-  fb: "Facebook",
-  website: "Website",
-  web: "Website",
-};
-
-export const CHANNEL_OPTIONS = ["Shopee", "Lazada", "TikTok Shop", "LINE", "Facebook", "Website"];
-
-export function normalizeChannel(raw: string): string {
-  const t = raw.trim().replace(/\s+/g, " ");
-  return KNOWN_CHANNELS[t.toLowerCase()] ?? t;
-}
-
-export function makeDedupeKey(channel: string, orderId: string, sku: string): string {
-  return `${channel.trim().toLowerCase()}|${orderId.trim()}|${sku.trim().toUpperCase()}`;
-}
-
-/** แปลงตัวเลข: ตัดคอมมา ช่องว่าง และสัญลักษณ์ ฿ ; คืน null ถ้าไม่ใช่ตัวเลข */
-export function parseAmount(raw: string | undefined): number | null | "empty" {
-  const t = (raw ?? "").replace(/[,\s฿]/g, "").replace(/บาท$/, "");
-  if (t === "") return "empty";
-  if (!/^-?\d+(\.\d+)?$/.test(t)) return null;
-  return Number(t);
-}
-
-/** รับ YYYY-MM-DD, YYYY/MM/DD, DD/MM/YYYY, DD-MM-YYYY (ปี พ.ศ. แปลงอัตโนมัติ) และตัดเวลาทิ้ง */
-export function parseDate(raw: string | undefined): string | null {
-  const t = (raw ?? "").trim().split(/[ T]/)[0];
-  let y: number, m: number, d: number;
-  let match = t.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
-  if (match) {
-    [y, m, d] = [Number(match[1]), Number(match[2]), Number(match[3])];
-  } else {
-    match = t.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
-    if (!match) return null;
-    [d, m, y] = [Number(match[1]), Number(match[2]), Number(match[3])];
-  }
-  if (y > 2400) y -= 543;
-  if (y < 2000 || y > 2100) return null;
-  const dt = new Date(y, m - 1, d);
-  if (dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) return null;
-  return toISODate(dt);
-}
+export { CHANNEL_OPTIONS, makeDedupeKey, normalizeChannel, parseAmount, parseDate } from "./import/parse";
 
 /** รายการขายที่ผ่านการตรวจแล้ว พร้อมต้นทุนต่อชิ้น ณ เวลาตรวจ */
 export type SaleDraft = Omit<Sale, "id" | "batchId" | "unitCost"> & { unitCost: number };
@@ -139,131 +92,55 @@ export function mapHeader(h: string): string {
   return HEADER_ALIASES[t] ?? HEADER_ALIASES[lower] ?? t;
 }
 
+/**
+ * ตรวจไฟล์แม่แบบ ProfitHub (CSV) — รักษารูปแบบผลลัพธ์เดิมของ v1.0/v1.1
+ * ภายในใช้ระบบนำเข้าใหม่ (src/lib/import) ด้วยหัวคอลัมน์แม่แบบเท่านั้น และ SKU ต้องมีในหน้าสินค้า
+ */
 export function validateSalesCsv(text: string, opts: ValidateOptions): ValidationResult {
-  const parsed = Papa.parse<Record<string, string>>(text.replace(/^﻿/, ""), {
-    header: true,
-    skipEmptyLines: "greedy",
-    transformHeader: mapHeader,
-  });
-
+  const sheet = csvToSheet(text);
+  const table = buildTable(sheet, 0, true);
+  const suggestion = suggestMapping(table.headers, genericAdapter);
+  // แม่แบบ: รับเฉพาะชื่อที่ตรงกับแม่แบบหรือชื่อภาษาไทยของแม่แบบ ไม่เดา
+  const mapping: ColumnMapping = {};
+  for (const [k, conf] of Object.entries(suggestion.confidence)) {
+    if (conf === "verified" || conf === "alias") mapping[k as ImportFieldKey] = suggestion.mapping[k as ImportFieldKey];
+  }
   const fileErrors: string[] = [];
-  const headers = parsed.meta.fields ?? [];
-  const missing = SALES_COLUMNS.filter((c) => c.required && !headers.includes(c.key));
+  const has = (k: ImportFieldKey) => (mapping[k]?.length ?? 0) > 0;
+  const missing = SALES_COLUMNS.filter((c) => {
+    if (!c.required) return false;
+    const key = (Object.entries(TEMPLATE_HEADERS).find(([, v]) => v === c.key)?.[0] ?? "") as ImportFieldKey;
+    return key === "unitPrice" ? !has("unitPrice") : !has(key);
+  });
   if (missing.length) {
     fileErrors.push(`ไม่พบคอลัมน์ที่จำเป็น: ${missing.map((c) => `${c.key} (${c.label})`).join(", ")}`);
   }
-  if (parsed.data.length === 0 && fileErrors.length === 0) fileErrors.push("ไฟล์ไม่มีข้อมูล");
-  if (parsed.data.length > LIMITS.maxCsvRows) {
-    fileErrors.push(`ไฟล์มี ${parsed.data.length} แถว เกินขีดจำกัด ${LIMITS.maxCsvRows} แถวต่อไฟล์ กรุณาแบ่งไฟล์`);
-  }
-  for (const e of parsed.errors) {
-    if (e.code === "UndetectableDelimiter") continue;
-    if (e.row === undefined) fileErrors.push(`อ่านไฟล์ไม่ได้: ${e.message}`);
-  }
+  if (!fileErrors.length && table.rows.length === 0) fileErrors.push("ไฟล์ไม่มีข้อมูล");
   if (fileErrors.length) return { fileErrors, rows: [], okCount: 0, errorCount: 0, duplicateCount: 0 };
 
-  const parseErrorRows = new Map<number, string>();
-  for (const e of parsed.errors) {
-    if (e.row !== undefined && e.code === "TooManyFields") parseErrorRows.set(e.row, "จำนวนคอลัมน์มากกว่าหัวตาราง");
-    else if (e.row !== undefined && e.code === "TooFewFields") parseErrorRows.set(e.row, "จำนวนคอลัมน์น้อยกว่าหัวตาราง");
-  }
-
-  const seenInFile = new Map<string, number>();
-  const rows: RowResult[] = parsed.data.map((raw, i) => {
-    const rowNo = i + 2;
-    const errors: string[] = [];
-    const structural = parseErrorRows.get(i);
-    if (structural) errors.push(structural);
-
-    const str = (k: ColumnKey) => (raw[k] ?? "").trim();
-
-    const orderId = str("order_id");
-    if (!orderId) errors.push("ไม่มีเลขคำสั่งซื้อ (order_id)");
-    else if (orderId.length > LIMITS.orderIdLength) errors.push(`เลขคำสั่งซื้อยาวเกิน ${LIMITS.orderIdLength} ตัวอักษร`);
-
-    const date = parseDate(raw.order_date);
-    if (!date) errors.push(`วันที่ไม่ถูกต้อง "${str("order_date")}" (ใช้ YYYY-MM-DD หรือ DD/MM/YYYY)`);
-
-    const channel = normalizeChannel(str("channel"));
-    if (!channel) errors.push("ไม่มีช่องทางขาย (channel)");
-    else if (channel.length > LIMITS.channelLength) errors.push(`ช่องทางขายยาวเกิน ${LIMITS.channelLength} ตัวอักษร`);
-
-    const sku = str("sku").toUpperCase();
-    const skuError = sku ? validateSku(sku) : null;
-    if (!sku) errors.push("ไม่มี SKU");
-    else if (skuError) errors.push(skuError);
-    else if (!opts.productCosts.has(sku)) errors.push(`ไม่พบ SKU "${sku}" ในหน้าสินค้า กรุณาเพิ่มสินค้าและต้นทุนก่อน`);
-
-    const num = (k: ColumnKey, label: string, required: boolean, integer = false): number => {
-      const v = parseAmount(raw[k]);
-      if (v === "empty") {
-        if (required) errors.push(`ไม่มี${label} (${k})`);
-        return 0;
-      }
-      if (v === null) {
-        errors.push(`${label}ไม่ใช่ตัวเลข "${str(k)}"`);
-        return 0;
-      }
-      if (v < 0) errors.push(`${label}ต้องไม่ติดลบ`);
-      else if (v > (integer ? LIMITS.maxQuantity : LIMITS.maxAmount)) errors.push(`${label}สูงผิดปกติ (${str(k)})`);
-      if (integer && !Number.isInteger(v)) errors.push(`${label}ต้องเป็นจำนวนเต็ม`);
-      return v;
-    };
-
-    const quantity = num("quantity", "จำนวนชิ้น", true, true);
-    if (parseAmount(raw.quantity) === 0) errors.push("จำนวนชิ้นต้องมากกว่า 0");
-    const unitPrice = num("unit_price", "ราคาขายต่อชิ้น", true);
-    const discount = num("discount", "ส่วนลด", false);
-    const refund = num("refund", "เงินคืน", false);
-    const returnedQty = num("returned_qty", "ชิ้นที่ได้รับคืน", false, true);
-    const platformFee = num("platform_fee", "ค่าธรรมเนียมแพลตฟอร์ม", false);
-    const shippingFee = num("shipping_fee", "ค่าขนส่ง", false);
-
-    const gross = unitPrice * quantity;
-    if (discount > gross) errors.push("ส่วนลดมากกว่ายอดขายของบรรทัด");
-    if (discount + refund > gross + 0.001) errors.push("ส่วนลดรวมเงินคืนมากกว่ายอดขายของบรรทัด");
-    if (returnedQty > quantity) errors.push("ชิ้นที่ได้รับคืนมากกว่าจำนวนชิ้นที่ขาย");
-
-    const dedupeKey = makeDedupeKey(channel, orderId, sku);
-    let status: RowStatus = errors.length ? "error" : "ok";
-    if (status === "ok") {
-      if (opts.existingKeys.has(dedupeKey)) {
-        status = "duplicate";
-        errors.push("รายการนี้ถูกนำเข้าแล้ว (ช่องทาง + เลขคำสั่งซื้อ + SKU ซ้ำ)");
-      } else if (seenInFile.has(dedupeKey)) {
-        status = "duplicate";
-        errors.push(`ซ้ำกับแถว ${seenInFile.get(dedupeKey)} ในไฟล์นี้ (หากเป็นสินค้าเดียวกัน ให้รวมจำนวนเป็นแถวเดียว)`);
-      } else {
-        seenInFile.set(dedupeKey, rowNo);
-      }
-    }
-
-    return {
-      row: rowNo,
-      status,
-      errors,
-      raw,
-      sale:
-        status === "ok"
-          ? {
-              orderId,
-              date: date!,
-              channel,
-              sku,
-              quantity,
-              unitPrice,
-              discount,
-              refund,
-              returnedQty,
-              platformFee,
-              shippingFee,
-              unitCost: opts.productCosts.get(sku)!,
-              dedupeKey,
-            }
-          : undefined,
-    };
+  const now = new Date().toISOString();
+  const products = [...opts.productCosts].map(([sku, unitCost]) => ({ id: sku, sku, name: sku, unitCost, createdAt: now, updatedAt: now }));
+  const preview = validateImport(table, mapping, { ...defaultOptions(genericAdapter), fixedChannel: null }, {
+    products,
+    aliases: [],
+    existingKeys: opts.existingKeys,
+    skuDecisions: {},
   });
+  if (preview.fileErrors.length) return { fileErrors: preview.fileErrors, rows: [], okCount: 0, errorCount: 0, duplicateCount: 0 };
 
+  const rows: RowResult[] = preview.rows.map((r) => {
+    let status: RowStatus = r.status === "unmapped" ? "error" : r.status;
+    const errors = r.errors.map((e) =>
+      e.startsWith("รอจับคู่ SKU") ? `ไม่พบ SKU "${r.sourceSku}" ในหน้าสินค้า กรุณาเพิ่มสินค้าและต้นทุนก่อน` : e,
+    );
+    if (r.status === "error" && r.sourceSku && !r.product && !validateSku(r.sourceSku)) {
+      errors.push(`ไม่พบ SKU "${r.sourceSku}" ในหน้าสินค้า กรุณาเพิ่มสินค้าและต้นทุนก่อน`);
+      status = "error";
+    }
+    const raw: Record<string, string> = {};
+    table.headers.forEach((h, i) => (raw[mapHeader(h)] = r.cells[i] ?? ""));
+    return { row: r.rowNumber, status, errors, raw, sale: status === "ok" ? r.draft : undefined };
+  });
   return {
     fileErrors: [],
     rows,

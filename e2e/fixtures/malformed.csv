@@ -1,0 +1,5 @@
+order_id,order_date,channel,sku,quantity,unit_price,discount
+BAD-1,not-a-date,Shopee,TS-001,abc,199,0
+BAD-2,2026-11-01,Shopee,TS 001,1,-5,0
+BAD-3,2026-11-01,Shopee,TS-001,1,100,500
+GOOD-1,2026-11-01,Shopee,TS-001,1,100,10

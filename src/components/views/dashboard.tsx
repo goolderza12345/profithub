@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { useMemo } from "react";
-import { AlertTriangle, ArrowRight, Coins, FlaskConical, Package, Percent, Receipt, ShieldCheck, TrendingUp, Upload, Wallet } from "lucide-react";
+import { AlertTriangle, ArrowRight, Coins, FlaskConical, Package, Percent, Receipt, ShieldCheck, TrendingUp, Upload, Wallet, Info } from "lucide-react";
 import { buildCostLookup, dailySeries, filterByRange, lossProducts, summarize } from "@/lib/profit";
 import { formatBaht, formatNumber, formatPercent } from "@/lib/format";
+import { OPTIONAL_FIELD_LABELS } from "@/lib/types";
 import { useData } from "../data-provider";
 import { DailyChart } from "../charts";
 import { RangeFilter } from "../range-filter";
@@ -70,6 +71,16 @@ export function DashboardView() {
         </div>
       )}
 
+      {s.incompleteLines > 0 && (
+        <div className="mb-4 flex gap-3 rounded-2xl bg-slate-100 p-4 text-sm text-slate-700" data-testid="estimate-notice">
+          <Info size={18} className="mt-0.5 shrink-0" />
+          <p>
+            <b>กำไรโดยประมาณ</b> — {formatNumber(s.incompleteLines)} รายการขายมาจากไฟล์ที่ไม่มีข้อมูล{" "}
+            {s.missingFields.map((f) => OPTIONAL_FIELD_LABELS[f]).join(", ")} (ระบบนับเป็น 0) ตัวเลขจริงอาจต่ำกว่านี้
+          </p>
+        </div>
+      )}
+
       {s.missingCostSkus.length > 0 && (
         <div className="mb-4 flex gap-3 rounded-2xl bg-amber-50 p-4 text-sm text-amber-900 ring-1 ring-amber-200">
           <AlertTriangle size={18} className="mt-0.5 shrink-0" />
@@ -86,7 +97,7 @@ export function DashboardView() {
         <StatCard label="ยอดขายสุทธิ" value={formatBaht(s.netRevenue)} icon={<Wallet size={17} />} tone="brand" sub={`ก่อนหักส่วนลด/คืนเงิน ${formatBaht(s.grossSales)}`} />
         <StatCard label="ต้นทุนสินค้ารวม" value={formatBaht(s.cogs)} icon={<Package size={17} />} tone="slate" sub="ต้นทุนต่อชิ้น × ชิ้นที่ขาย" />
         <StatCard label="ค่าใช้จ่ายรวม" value={formatBaht(s.totalExpenses)} icon={<Receipt size={17} />} tone="amber" sub={`ในคำสั่งซื้อ ${formatBaht(s.orderFees)} · บันทึกเอง ${formatBaht(s.manualExpenses)}`} />
-        <StatCard label="กำไรสุทธิ" value={formatBaht(s.netProfit)} icon={<Coins size={17} />} tone={s.netProfit < 0 ? "red" : "green"} sub={s.netProfit < 0 ? "ขาดทุนในช่วงนี้" : "หลังหักทุกอย่างแล้ว"} />
+        <StatCard label={s.isEstimate ? "กำไรสุทธิ (โดยประมาณ)" : "กำไรสุทธิ"} value={formatBaht(s.netProfit)} icon={<Coins size={17} />} tone={s.netProfit < 0 ? "red" : "green"} sub={s.netProfit < 0 ? "ขาดทุนในช่วงนี้" : "หลังหักทุกอย่างแล้ว"} />
         <StatCard
           className="col-span-2 lg:col-span-1"
           label="อัตรากำไรสุทธิ"
@@ -121,7 +132,7 @@ export function DashboardView() {
             <Row label="− ค่าธรรมเนียม/ขนส่งในคำสั่งซื้อ" value={-s.orderFees} />
             <Row label="− ค่าใช้จ่ายที่บันทึกเอง" value={-s.manualExpenses} />
             <div className="border-t border-slate-200 pt-2">
-              <Row label="= กำไรสุทธิ" value={s.netProfit} strong colored />
+              <Row label={s.isEstimate ? "= กำไรสุทธิโดยประมาณ" : "= กำไรสุทธิ"} value={s.netProfit} strong colored />
             </div>
           </dl>
         </Card>

@@ -9,10 +9,14 @@
 import { checksum } from "./checksum";
 import { countsOf, type Snapshot, type SnapshotCounts } from "./db";
 import type { DatasetId } from "./types";
-import { batchErrors, expenseErrors, productErrors, saleErrors } from "./validation";
+import { batchErrors, expenseErrors, productErrors, saleErrors, skuAliasErrors } from "./validation";
 
 export const BACKUP_KIND = "profithub-backup";
-export const BACKUP_SCHEMA_VERSION = 1;
+/**
+ * 1: v1.1 (สินค้า รายการขาย ค่าใช้จ่าย ชุดนำเข้า)
+ * 2: v1.2 เพิ่ม skuAliases — ยังกู้คืนไฟล์เวอร์ชัน 1 ได้ (ถือว่าไม่มีการจับคู่ SKU)
+ */
+export const BACKUP_SCHEMA_VERSION = 2;
 export const MAX_BACKUP_BYTES = 50 * 1024 * 1024;
 const MAX_REPORTED_ERRORS = 30;
 
@@ -34,6 +38,7 @@ export function createBackup(dataset: DatasetId, data: Snapshot, now: Date = new
     sales: data.sales,
     expenses: data.expenses,
     batches: data.batches,
+    skuAliases: data.skuAliases ?? [],
   };
   return {
     kind: BACKUP_KIND,
@@ -104,11 +109,14 @@ export function parseBackup(text: string, targetDataset: DatasetId): BackupCheck
   for (const k of ["products", "sales", "expenses", "batches"] as const) {
     if (!Array.isArray(data[k])) return fail(`ข้อมูล ${k} ในไฟล์ไม่ถูกต้อง`);
   }
+  if (f.schemaVersion >= 2 && !Array.isArray(data.skuAliases)) return fail("ข้อมูล skuAliases ในไฟล์ไม่ถูกต้อง");
   if (typeof f.checksum !== "string" || checksumOf(f.dataset, data) !== f.checksum) {
     return fail("checksum ไม่ตรงกัน — ไฟล์อาจเสียหายหรือถูกแก้ไข จึงไม่กู้คืนเพื่อความปลอดภัยของข้อมูล");
   }
 
-  const snap = data as unknown as Snapshot;
+  // ไฟล์เวอร์ชัน 1 ไม่มีการจับคู่ SKU
+  const snap = { ...(data as unknown as Snapshot), skuAliases: (data.skuAliases as Snapshot["skuAliases"]) ?? [] };
+  const aliases = snap.skuAliases;
   const push = (msg: string) => {
     if (errors.length < MAX_REPORTED_ERRORS) errors.push(msg);
     else if (errors.length === MAX_REPORTED_ERRORS) errors.push("…และข้อผิดพลาดอื่น ๆ");
@@ -122,6 +130,7 @@ export function parseBackup(text: string, targetDataset: DatasetId): BackupCheck
   check("รายการขาย", snap.sales, saleErrors);
   check("ค่าใช้จ่าย", snap.expenses, expenseErrors);
   check("ชุดนำเข้า", snap.batches, batchErrors);
+  check("การจับคู่ SKU", aliases, skuAliasErrors);
 
   const dupes = <T>(label: string, items: T[], key: (t: T) => unknown) => {
     const seen = new Set<unknown>();
@@ -138,12 +147,18 @@ export function parseBackup(text: string, targetDataset: DatasetId): BackupCheck
     dupes("รายการขาย (ช่องทาง + เลขคำสั่งซื้อ + SKU)", snap.sales, (s) => s.dedupeKey);
     dupes("รหัสค่าใช้จ่าย (id)", snap.expenses, (e) => e.id);
     dupes("รหัสชุดนำเข้า (id)", snap.batches, (b) => b.id);
+    dupes("การจับคู่ SKU", aliases, (a) => a.alias);
+    const productIds = new Set(snap.products.map((p) => p.id));
+    for (const a of aliases) {
+      if (!productIds.has(a.productId)) push(`การจับคู่ SKU "${a.alias}" ชี้ไปยังสินค้าที่ไม่มีในไฟล์`);
+    }
   }
 
   if (errors.length === 0) {
     const counts = countsOf(snap);
     const declared = f.counts as Partial<SnapshotCounts> | undefined;
-    if (declared && (Object.keys(counts) as (keyof SnapshotCounts)[]).some((k) => declared[k] !== counts[k])) {
+    // ตรวจเฉพาะจำนวนที่ไฟล์ระบุไว้ (ไฟล์เวอร์ชัน 1 ไม่มีจำนวน skuAliases)
+    if (declared && (Object.keys(declared) as (keyof SnapshotCounts)[]).some((k) => k in counts && declared[k] !== counts[k])) {
       push("จำนวนข้อมูลในไฟล์ไม่ตรงกับที่บันทึกไว้ในไฟล์");
     }
     const skus = new Set(snap.products.map((p) => p.sku));
@@ -157,5 +172,5 @@ export function parseBackup(text: string, targetDataset: DatasetId): BackupCheck
   }
 
   if (errors.length) return { ok: false, errors, warnings };
-  return { ok: true, errors: [], warnings, backup: f as unknown as BackupFile };
+  return { ok: true, errors: [], warnings, backup: { ...(f as unknown as BackupFile), data: snap } };
 }

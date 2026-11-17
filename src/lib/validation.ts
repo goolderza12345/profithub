@@ -1,7 +1,7 @@
 /**
  * ตรวจความถูกต้องของข้อมูลแต่ละประเภท ใช้ร่วมกันทั้งตอนนำเข้า CSV, บันทึกฟอร์ม และกู้คืน Backup
  */
-import { EXPENSE_CATEGORIES, type Expense, type ImportBatch, type Product, type Sale } from "./types";
+import { EXPENSE_CATEGORIES, OPTIONAL_SALE_FIELDS, type Expense, type ImportBatch, type Product, type Sale, type SkuAlias } from "./types";
 
 export const LIMITS = {
   skuLength: 64,
@@ -76,6 +76,17 @@ export function saleErrors(v: unknown): string[] {
     if (!isMoney(s[k])) e.push(`${k} ไม่ถูกต้อง`);
   }
   if (s.unitCost !== undefined && !isMoney(s.unitCost)) e.push("ต้นทุนต่อชิ้น (snapshot) ไม่ถูกต้อง");
+  if (s.sourceSku !== undefined && (typeof s.sourceSku !== "string" || validateSku(s.sourceSku))) {
+    e.push(`SKU ตามไฟล์ต้นทางไม่ถูกต้อง (${String(s.sourceSku)})`);
+  }
+  if (s.missingFields !== undefined) {
+    const mf = s.missingFields;
+    const ok =
+      Array.isArray(mf) &&
+      mf.every((f) => (OPTIONAL_SALE_FIELDS as readonly unknown[]).includes(f)) &&
+      new Set(mf).size === mf.length;
+    if (!ok) e.push("รายการช่องที่ไม่มีข้อมูล (missingFields) ไม่ถูกต้อง");
+  }
   if (isMoney(s.unitPrice) && isCount(s.quantity, 1) && isMoney(s.discount) && isMoney(s.refund)) {
     if (s.discount + s.refund > s.unitPrice * s.quantity + 0.001) e.push("ส่วนลดรวมเงินคืนมากกว่ายอดขาย");
   }
@@ -106,6 +117,18 @@ export function batchErrors(v: unknown): string[] {
   if (!isStr(b.fileName, LIMITS.fileNameLength)) e.push("ชื่อไฟล์ไม่ถูกต้อง");
   if (!isTimestamp(b.importedAt)) e.push("วันเวลานำเข้าไม่ถูกต้อง");
   if (!isCount(b.rowCount, 0)) e.push("จำนวนแถวไม่ถูกต้อง");
+  if (b.adapterId !== undefined && !isStr(b.adapterId, 40)) e.push("รูปแบบไฟล์ (adapterId) ไม่ถูกต้อง");
+  if (b.fileHash !== undefined && !isStr(b.fileHash, 64)) e.push("checksum ของไฟล์ไม่ถูกต้อง");
+  return e;
+}
+
+export function skuAliasErrors(v: unknown): string[] {
+  const a = asRec(v);
+  if (!a) return ["ไม่ใช่ข้อมูลการจับคู่ SKU"];
+  const e: string[] = [];
+  if (typeof a.alias !== "string" || validateSku(a.alias)) e.push(`SKU ในไฟล์ไม่ถูกต้อง (${String(a.alias)})`);
+  if (!isStr(a.productId, 100)) e.push("productId ไม่ถูกต้อง");
+  if (!isTimestamp(a.createdAt)) e.push("วันเวลาที่บันทึกไม่ถูกต้อง");
   return e;
 }
 
@@ -114,3 +137,4 @@ export const isProduct = (v: unknown): v is Product => productErrors(v).length =
 export const isSale = (v: unknown): v is Sale => saleErrors(v).length === 0;
 export const isExpense = (v: unknown): v is Expense => expenseErrors(v).length === 0;
 export const isBatch = (v: unknown): v is ImportBatch => batchErrors(v).length === 0;
+export const isSkuAlias = (v: unknown): v is SkuAlias => skuAliasErrors(v).length === 0;

@@ -1,6 +1,6 @@
 import { toCsv } from "./csv";
 import { buildCostLookup, calcLine, profitByChannel, profitByProduct, summarize } from "./profit";
-import { EXPENSE_LABELS, type DatasetId, type Expense, type Product, type Sale } from "./types";
+import { EXPENSE_LABELS, OPTIONAL_FIELD_LABELS, type DatasetId, type Expense, type Product, type Sale } from "./types";
 
 export type ReportKind = "sales" | "costs" | "profit" | "product" | "channel";
 
@@ -62,8 +62,14 @@ export function buildReportRows(
         ["หัก ค่าธรรมเนียมแพลตฟอร์ม (ในคำสั่งซื้อ)", -s.orderPlatformFees],
         ["หัก ค่าขนส่งที่ร้านออก (ในคำสั่งซื้อ)", -s.orderShippingFees],
         ...Object.entries(s.expensesByCategory).map(([c, v]) => [`หัก ${EXPENSE_LABELS[c as keyof typeof EXPENSE_LABELS]} (บันทึกเอง)`, -v]),
-        ["กำไรสุทธิ", s.netProfit],
+        [s.isEstimate ? "กำไรสุทธิ (โดยประมาณ)" : "กำไรสุทธิ", s.netProfit],
         ["อัตรากำไรสุทธิ (%)", pct(s.netMargin)],
+        [
+          "หมายเหตุ",
+          s.isEstimate
+            ? `ข้อมูลต้นทางไม่ครบ (${[...s.missingFields.map((f) => OPTIONAL_FIELD_LABELS[f]), ...(s.missingCostSkus.length ? ["ต้นทุนสินค้าบางรายการ"] : [])].join(", ")}) — เป็นค่าประมาณ ไม่ใช่กำไรทางบัญชี`
+            : "คำนวณจากข้อมูลที่บันทึกในระบบ ไม่ใช่กำไรทางบัญชี (ไม่รวมภาษี)",
+        ],
       ];
     }
     case "product":

@@ -12,6 +12,22 @@ export interface Product {
 }
 
 /**
+ * ช่องจำนวนเงิน/จำนวนที่ไม่บังคับในไฟล์ยอดขาย
+ * ถ้าไฟล์ไม่มีคอลัมน์นี้ จะเก็บค่า 0 ไว้ในตัวเลข แต่ระบุชื่อช่องไว้ใน Sale.missingFields
+ * เพื่อแยก "ไม่มีข้อมูล" ออกจาก "มีค่าเป็นศูนย์"
+ */
+export const OPTIONAL_SALE_FIELDS = ["discount", "refund", "returnedQty", "platformFee", "shippingFee"] as const;
+export type OptionalSaleField = (typeof OPTIONAL_SALE_FIELDS)[number];
+
+export const OPTIONAL_FIELD_LABELS: Record<OptionalSaleField, string> = {
+  discount: "ส่วนลด",
+  refund: "เงินคืนลูกค้า",
+  returnedQty: "ชิ้นที่ได้รับคืน",
+  platformFee: "ค่าธรรมเนียมแพลตฟอร์ม",
+  shippingFee: "ค่าขนส่งที่ร้านออก",
+};
+
+/**
  * รายการขาย 1 บรรทัด (1 SKU ใน 1 คำสั่งซื้อ)
  * ทุกจำนวนเงินเป็นบาท และแต่ละรายการถูกเก็บไว้ที่เดียว เพื่อไม่ให้หักซ้ำ
  */
@@ -41,6 +57,16 @@ export interface Sale {
    * undefined = ข้อมูลเก่าก่อนมี snapshot (ระบบจะใช้ต้นทุนปัจจุบันแทน)
    */
   unitCost?: number;
+  /**
+   * SKU ตามไฟล์ต้นทาง (v1.2+) ถ้าไม่ตรงกับ SKU ในระบบ ผู้ใช้จับคู่ให้เป็น sku ของสินค้า
+   * undefined = ข้อมูลก่อน v1.2 (ถือว่าเท่ากับ sku)
+   */
+  sourceSku?: string;
+  /**
+   * ช่องที่ไฟล์ต้นทางไม่มีข้อมูล (v1.2+) ค่าตัวเลขของช่องเหล่านี้เป็น 0 แต่ไม่ใช่ศูนย์จริง
+   * ทำให้กำไรเป็น "กำไรโดยประมาณ"  undefined = ข้อมูลก่อน v1.2 (ไม่ได้ติดตาม)
+   */
+  missingFields?: OptionalSaleField[];
   dedupeKey: string;
   batchId: string;
 }
@@ -79,6 +105,21 @@ export interface ImportBatch {
   fileName: string;
   importedAt: string;
   rowCount: number;
+  /** รูปแบบไฟล์ที่ใช้นำเข้า (v1.2+) เช่น generic, shopee */
+  adapterId?: string;
+  /** checksum ของไฟล์ (v1.2+) ใช้เตือนเมื่อนำเข้าไฟล์เดิมซ้ำ */
+  fileHash?: string;
+}
+
+/**
+ * SKU จากไฟล์ต้นทางที่ผู้ใช้จับคู่กับสินค้าในระบบไว้ (v1.2+)
+ * ครั้งต่อไปที่พบ SKU นี้ ระบบจะจับคู่ให้อัตโนมัติ
+ */
+export interface SkuAlias {
+  /** SKU จากไฟล์ (ตัวพิมพ์ใหญ่) */
+  alias: string;
+  productId: string;
+  createdAt: string;
 }
 
 export interface DateRange {

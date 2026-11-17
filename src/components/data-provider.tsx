@@ -2,12 +2,12 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import * as store from "@/lib/db";
-import type { ExpenseInput, ImportOutcome, ProductInput, RestorePointInfo, Snapshot } from "@/lib/db";
+import type { ExpenseInput, ImportExtras, ImportOutcome, ProductInput, RestorePointInfo, Snapshot } from "@/lib/db";
 import { backupFileName, createBackup, serializeBackup, type BackupFile } from "@/lib/backup";
 import { generateDemoData } from "@/lib/demo";
 import { presetRange, type RangePreset } from "@/lib/dates";
 import type { SaleDraft } from "@/lib/csv";
-import type { DatasetId, DateRange } from "@/lib/types";
+import type { DatasetId, DateRange, SkuAlias } from "@/lib/types";
 
 export type { ExpenseInput, ProductInput };
 
@@ -22,7 +22,8 @@ interface RangeState {
 
 export type PersistState = "unsupported" | "persisted" | "not-persisted" | "unknown";
 
-interface DataContextValue extends Snapshot {
+interface DataContextValue extends Omit<Snapshot, "skuAliases"> {
+  skuAliases: SkuAlias[];
   ready: boolean;
   error: string | null;
   dataset: DatasetId;
@@ -33,7 +34,7 @@ interface DataContextValue extends Snapshot {
   clearCurrent: () => Promise<void>;
   saveProduct: (input: ProductInput, id?: string) => Promise<void>;
   deleteProduct: (id: string) => Promise<void>;
-  importSales: (drafts: SaleDraft[], fileName: string) => Promise<ImportOutcome>;
+  importSales: (drafts: SaleDraft[], fileName: string, extras?: ImportExtras) => Promise<ImportOutcome>;
   deleteBatch: (batchId: string) => Promise<void>;
   saveExpense: (input: ExpenseInput, id?: string) => Promise<void>;
   deleteExpense: (id: string) => Promise<void>;
@@ -56,7 +57,7 @@ interface DataContextValue extends Snapshot {
 
 const DataContext = createContext<DataContextValue | null>(null);
 
-const EMPTY: Snapshot = { products: [], sales: [], expenses: [], batches: [] };
+const EMPTY: Snapshot = { products: [], sales: [], expenses: [], batches: [], skuAliases: [] };
 
 function readStorage<T>(key: string, fallback: T): T {
   try {
@@ -202,6 +203,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
 
   const value: DataContextValue = {
     ...data,
+    skuAliases: data.skuAliases ?? [],
     ready,
     error,
     dataset,

@@ -13,11 +13,16 @@
  *   ค่าใช้จ่ายที่บันทึกเอง        = ผลรวมรายการในหน้า "ค่าใช้จ่าย"            (ไม่ได้มาจาก CSV)
  *   กำไรสุทธิ (netProfit)        = กำไรหลังหักต้นทุนขาย − ค่าใช้จ่ายที่บันทึกเอง
  *   อัตรากำไรสุทธิ               = netProfit ÷ netRevenue
+ *
+ * ผลลัพธ์นี้ไม่ใช่กำไรสุทธิทางบัญชี (ไม่รวมภาษีและค่าใช้จ่ายที่ไม่ได้บันทึก)
+ * ถ้าไฟล์ต้นทางไม่มีบางช่อง (Sale.missingFields) หรือไม่มีต้นทุน ระบบจะระบุว่าเป็น "กำไรโดยประมาณ" (isEstimate)
  */
 import { eachDay, inRange } from "./dates";
 import { round2, sum } from "./money";
 import {
   EXPENSE_CATEGORIES,
+  OPTIONAL_SALE_FIELDS,
+  type OptionalSaleField,
   type DateRange,
   type Expense,
   type ExpenseCategory,
@@ -101,6 +106,12 @@ export interface ProfitSummary {
   /** null เมื่อรายได้สุทธิเป็น 0 หรือติดลบ */
   netMargin: number | null;
   missingCostSkus: string[];
+  /** จำนวนบรรทัดที่ไฟล์ต้นทางไม่มีข้อมูลบางช่อง */
+  incompleteLines: number;
+  /** ช่องที่ไม่มีข้อมูลในบางบรรทัด */
+  missingFields: OptionalSaleField[];
+  /** ข้อมูลต้นทางไม่ครบ (ไม่มีบางช่อง หรือไม่มีต้นทุน) → ต้องแสดงเป็น "กำไรโดยประมาณ" */
+  isEstimate: boolean;
 }
 
 function emptyCategories(): Record<ExpenseCategory, number> {
@@ -137,6 +148,8 @@ export function summarize(sales: Sale[], expenses: Expense[], costs: CostLookup)
   sales.forEach((s, i) => {
     if (lines[i].costMissing) missing.add(s.sku);
   });
+  const incomplete = sales.filter((s) => (s.missingFields?.length ?? 0) > 0);
+  const missingFields = OPTIONAL_SALE_FIELDS.filter((f) => incomplete.some((s) => s.missingFields!.includes(f)));
 
   return {
     orderCount: new Set(sales.map((s) => `${s.channel}|${s.orderId}`)).size,
@@ -158,6 +171,9 @@ export function summarize(sales: Sale[], expenses: Expense[], costs: CostLookup)
     netProfit,
     netMargin: margin(netProfit, netRevenue),
     missingCostSkus: [...missing].sort(),
+    incompleteLines: incomplete.length,
+    missingFields,
+    isEstimate: incomplete.length > 0 || missing.size > 0,
   };
 }
 

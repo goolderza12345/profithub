@@ -1,13 +1,15 @@
 import { openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction } from "idb";
 import type { SaleDraft } from "./csv";
 import { newId } from "./id";
-import type { DatasetId, Expense, ImportBatch, Product, Sale } from "./types";
+import type { DatasetId, Expense, ImportBatch, Product, Sale, SkuAlias } from "./types";
 
 export interface Snapshot {
   products: Product[];
   sales: Sale[];
   expenses: Expense[];
   batches: ImportBatch[];
+  /** การจับคู่ SKU (v1.2+) — undefined ในจุดกู้คืน/ไฟล์ Backup รุ่นก่อน ถือเป็นรายการว่าง */
+  skuAliases?: SkuAlias[];
 }
 
 export interface SnapshotCounts {
@@ -15,6 +17,7 @@ export interface SnapshotCounts {
   sales: number;
   expenses: number;
   batches: number;
+  skuAliases?: number;
 }
 
 /** สำเนาข้อมูลอัตโนมัติก่อนการกระทำที่ลบ/เขียนทับข้อมูลจำนวนมาก (เก็บในฐานข้อมูลเดียวกัน) */
@@ -34,19 +37,21 @@ interface ProfitHubDB extends DBSchema {
   expenses: { key: string; value: Expense };
   batches: { key: string; value: ImportBatch };
   restorePoints: { key: string; value: RestorePoint };
+  skuAliases: { key: string; value: SkuAlias; indexes: { productId: string } };
 }
 
 export type DB = IDBPDatabase<ProfitHubDB>;
 
-const DATA_STORES = ["products", "sales", "expenses", "batches"] as const;
+const DATA_STORES = ["products", "sales", "expenses", "batches", "skuAliases"] as const;
 const ALL_STORES = [...DATA_STORES, "restorePoints"] as const;
 type RWTx = IDBPTransaction<ProfitHubDB, typeof ALL_STORES extends readonly (infer T)[] ? T[] : never, "readwrite">;
 
 /**
  * v1: MVP 1.0
  * v2: เพิ่ม restorePoints และบันทึกต้นทุนต่อชิ้น (snapshot) ให้รายการขายเดิม
+ * v3: เพิ่ม skuAliases (จำการจับคู่ SKU จากไฟล์กับสินค้า) — ไม่แก้ข้อมูลเดิม
  */
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const MAX_RESTORE_POINTS = 5;
 
 /** ข้อมูลจริงและข้อมูล Demo อยู่คนละฐานข้อมูลใน IndexedDB */
@@ -84,6 +89,9 @@ export function getDB(dataset: DatasetId): Promise<DB> {
             });
           }
         }
+        if (oldVersion < 3) {
+          db.createObjectStore("skuAliases", { keyPath: "alias" }).createIndex("productId", "productId");
+        }
       },
     });
     p.catch(() => cache.delete(dataset));
@@ -117,36 +125,45 @@ export async function closeAllForTests() {
 }
 
 export function countsOf(s: Snapshot): SnapshotCounts {
-  return { products: s.products.length, sales: s.sales.length, expenses: s.expenses.length, batches: s.batches.length };
+  return {
+    products: s.products.length,
+    sales: s.sales.length,
+    expenses: s.expenses.length,
+    batches: s.batches.length,
+    skuAliases: s.skuAliases?.length ?? 0,
+  };
 }
 
 export async function loadAll(dataset: DatasetId): Promise<Snapshot> {
   const db = await getDB(dataset);
   const tx = db.transaction(DATA_STORES, "readonly");
-  const [products, sales, expenses, batches] = await Promise.all([
+  const [products, sales, expenses, batches, skuAliases] = await Promise.all([
     tx.objectStore("products").getAll(),
     tx.objectStore("sales").getAll(),
     tx.objectStore("expenses").getAll(),
     tx.objectStore("batches").getAll(),
+    tx.objectStore("skuAliases").getAll(),
   ]);
-  return { products, sales, expenses, batches };
+  return { products, sales, expenses, batches, skuAliases };
 }
 
 /** บันทึกจุดกู้คืนภายใน transaction เดียวกับการเปลี่ยนแปลง (ถ้าการเปลี่ยนแปลงล้มเหลว จุดกู้คืนก็ไม่ถูกสร้าง) */
-async function addRestorePoint(tx: RWTx, reason: string): Promise<void> {
-  const [products, sales, expenses, batches] = await Promise.all([
+async function addRestorePoint(tx: RWTx, reason: string): Promise<boolean> {
+  const [products, sales, expenses, batches, skuAliases] = await Promise.all([
     tx.objectStore("products").getAll(),
     tx.objectStore("sales").getAll(),
     tx.objectStore("expenses").getAll(),
     tx.objectStore("batches").getAll(),
+    tx.objectStore("skuAliases").getAll(),
   ]);
-  const data = { products, sales, expenses, batches };
-  if (products.length + sales.length + expenses.length + batches.length === 0) return;
+  const data = { products, sales, expenses, batches, skuAliases };
+  if (products.length + sales.length + expenses.length + batches.length + skuAliases.length === 0) return false;
   const store = tx.objectStore("restorePoints");
   await store.put({ id: newId(), createdAt: new Date().toISOString(), reason, counts: countsOf(data), data });
   const all = await store.getAll();
   all.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   for (const old of all.slice(MAX_RESTORE_POINTS)) await store.delete(old.id);
+  return true;
 }
 
 export async function listRestorePoints(dataset: DatasetId): Promise<RestorePointInfo[]> {
@@ -175,6 +192,7 @@ export async function replaceAll(
     for (const s of data.sales) await tx.objectStore("sales").add(s);
     for (const e of data.expenses) await tx.objectStore("expenses").add(e);
     for (const b of data.batches) await tx.objectStore("batches").add(b);
+    for (const a of data.skuAliases ?? []) await tx.objectStore("skuAliases").add(a);
     await tx.done;
   } catch (e) {
     try {
@@ -196,7 +214,7 @@ export async function restoreFromPoint(dataset: DatasetId, pointId: string): Pro
 }
 
 export async function clearAll(dataset: DatasetId, restorePoint = true): Promise<void> {
-  await replaceAll(dataset, { products: [], sales: [], expenses: [], batches: [] }, { reason: "ก่อนลบข้อมูลทั้งหมด", restorePoint });
+  await replaceAll(dataset, { products: [], sales: [], expenses: [], batches: [], skuAliases: [] }, { reason: "ก่อนลบข้อมูลทั้งหมด", restorePoint });
 }
 
 export interface ProductInput {
@@ -235,7 +253,12 @@ export async function deleteProduct(dataset: DatasetId, id: string): Promise<voi
   if (!p) return;
   const used = await salesUsingSku(db, p.sku);
   if (used) throw new Error(`ลบไม่ได้ เพราะมีรายการขาย ${used} รายการที่ใช้ SKU นี้ (ลบชุดนำเข้าที่เกี่ยวข้องก่อน)`);
-  await db.delete("products", id);
+  // ลบสินค้าพร้อมการจับคู่ SKU ที่ชี้มาที่สินค้านี้ใน transaction เดียว
+  const tx = db.transaction(["products", "skuAliases"], "readwrite");
+  const aliasKeys = await tx.objectStore("skuAliases").index("productId").getAllKeys(id);
+  for (const k of aliasKeys) await tx.objectStore("skuAliases").delete(k);
+  await tx.objectStore("products").delete(id);
+  await tx.done;
 }
 
 export interface ImportOutcome {
@@ -243,39 +266,110 @@ export interface ImportOutcome {
   skippedDuplicate: number;
   skippedMissingProduct: number;
   batchId: string | null;
+  /** สินค้าใหม่ที่สร้างตามที่ผู้ใช้ยืนยัน */
+  createdProducts: number;
+  /** การจับคู่ SKU ที่บันทึกไว้ใช้ครั้งต่อไป */
+  savedAliases: number;
+  /** สร้างจุดกู้คืนก่อนนำเข้าหรือไม่ (ไม่สร้างเมื่อยังไม่มีข้อมูลเดิม) */
+  restorePointCreated: boolean;
+}
+
+export interface ImportExtras {
+  adapterId?: string;
+  fileHash?: string;
+  /** สินค้าใหม่ที่ผู้ใช้ยืนยันให้สร้างระหว่างนำเข้า */
+  newProducts?: ProductInput[];
+  /** SKU ในไฟล์ → สินค้าเดิม ที่ผู้ใช้เลือกไว้ */
+  aliases?: { alias: string; productId: string }[];
+  /** เก็บจุดกู้คืนก่อนนำเข้า (ค่าเริ่มต้น: เก็บ) */
+  restorePoint?: boolean;
 }
 
 /**
- * นำเข้ารายการขาย: ตรวจซ้ำกับฐานข้อมูลอีกครั้ง และบันทึกต้นทุนต่อชิ้นของสินค้า ณ เวลานำเข้า (snapshot)
- * อ่านต้นทุนจากฐานข้อมูลใน transaction เดียวกัน จึงได้ค่าล่าสุดเสมอ
+ * นำเข้ารายการขายใน transaction เดียว (all-or-nothing):
+ * จุดกู้คืน → สินค้าใหม่ที่ผู้ใช้ยืนยัน → การจับคู่ SKU → รายการขาย → ประวัติการนำเข้า
+ * - ตรวจซ้ำกับฐานข้อมูลอีกครั้ง (dedupeKey) และข้ามรายการที่มีอยู่แล้ว
+ * - บันทึกต้นทุนต่อชิ้นของสินค้า ณ เวลานำเข้า (snapshot) โดยอ่านจากฐานข้อมูลในจังหวะนั้น
+ * หากขั้นตอนใดผิดพลาด จะยกเลิกทั้งหมด ไม่มีข้อมูลครึ่งชุด
  */
-export async function importSales(dataset: DatasetId, drafts: SaleDraft[], fileName: string): Promise<ImportOutcome> {
+export async function importSales(
+  dataset: DatasetId,
+  drafts: SaleDraft[],
+  fileName: string,
+  extras: ImportExtras = {},
+): Promise<ImportOutcome> {
   const db = await getDB(dataset);
-  const batch: ImportBatch = { id: newId(), fileName: fileName.slice(0, 255), importedAt: new Date().toISOString(), rowCount: 0 };
-  const tx = db.transaction(["sales", "batches", "products"], "readwrite");
-  const sales = tx.objectStore("sales");
-  const productBySku = tx.objectStore("products").index("sku");
-  const out: ImportOutcome = { added: 0, skippedDuplicate: 0, skippedMissingProduct: 0, batchId: null };
-  for (const d of drafts) {
-    if (await sales.index("dedupeKey").getKey(d.dedupeKey)) {
-      out.skippedDuplicate++;
-      continue;
+  const now = new Date().toISOString();
+  const batch: ImportBatch = { id: newId(), fileName: fileName.slice(0, 255), importedAt: now, rowCount: 0 };
+  if (extras.adapterId) batch.adapterId = extras.adapterId.slice(0, 40);
+  if (extras.fileHash) batch.fileHash = extras.fileHash.slice(0, 64);
+  const out: ImportOutcome = {
+    added: 0,
+    skippedDuplicate: 0,
+    skippedMissingProduct: 0,
+    batchId: null,
+    createdProducts: 0,
+    savedAliases: 0,
+    restorePointCreated: false,
+  };
+  const tx = db.transaction(ALL_STORES, "readwrite") as RWTx;
+  try {
+    if (extras.restorePoint !== false && drafts.length > 0) {
+      out.restorePointCreated = await addRestorePoint(tx, `ก่อนนำเข้า "${batch.fileName}"`);
     }
-    const product = await productBySku.get(d.sku.toUpperCase());
-    if (!product) {
-      out.skippedMissingProduct++;
-      continue;
+    const products = tx.objectStore("products");
+    for (const np of extras.newProducts ?? []) {
+      const sku = np.sku.trim().toUpperCase();
+      if (await products.index("sku").getKey(sku)) throw new Error(`SKU "${sku}" มีอยู่แล้วในระบบ — ยกเลิกการนำเข้าทั้งหมด`);
+      await products.add({ id: newId(), sku, name: np.name.trim(), unitCost: np.unitCost, createdAt: now, updatedAt: now });
+      out.createdProducts++;
     }
-    await sales.add({ ...d, unitCost: product.unitCost, id: newId(), batchId: batch.id });
-    out.added++;
+    for (const a of extras.aliases ?? []) {
+      if (!(await products.get(a.productId))) throw new Error("ไม่พบสินค้าที่จับคู่ไว้ — ยกเลิกการนำเข้าทั้งหมด");
+      await tx.objectStore("skuAliases").put({ alias: a.alias.trim().toUpperCase(), productId: a.productId, createdAt: now });
+      out.savedAliases++;
+    }
+    const sales = tx.objectStore("sales");
+    for (const d of drafts) {
+      if (await sales.index("dedupeKey").getKey(d.dedupeKey)) {
+        out.skippedDuplicate++;
+        continue;
+      }
+      const product = await products.index("sku").get(d.sku.toUpperCase());
+      if (!product) {
+        out.skippedMissingProduct++;
+        continue;
+      }
+      await sales.add({ ...d, unitCost: product.unitCost, id: newId(), batchId: batch.id });
+      out.added++;
+    }
+    batch.rowCount = out.added;
+    if (out.added > 0) {
+      await tx.objectStore("batches").add(batch);
+      out.batchId = batch.id;
+    }
+    await tx.done;
+    return out;
+  } catch (e) {
+    try {
+      tx.abort();
+    } catch {
+      /* ถูกยกเลิกแล้ว */
+    }
+    await tx.done.catch(() => undefined);
+    throw e;
   }
-  batch.rowCount = out.added;
-  if (out.added > 0) {
-    await tx.objectStore("batches").add(batch);
-    out.batchId = batch.id;
-  }
-  await tx.done;
-  return out;
+}
+
+/** การจับคู่ SKU ทั้งหมดของชุดข้อมูล */
+export async function listSkuAliases(dataset: DatasetId): Promise<SkuAlias[]> {
+  const db = await getDB(dataset);
+  return db.getAll("skuAliases");
+}
+
+export async function deleteSkuAlias(dataset: DatasetId, alias: string): Promise<void> {
+  const db = await getDB(dataset);
+  await db.delete("skuAliases", alias);
 }
 
 export async function deleteBatch(dataset: DatasetId, batchId: string): Promise<number> {
