@@ -15,6 +15,9 @@ import { Badge, buttonClass, Card, cn, EmptyState, inputClass, Loading, Modal, P
 
 type Filter = "all" | "counted" | "excluded" | "provisional" | "cancelledLines" | "mismatch";
 
+/** ค่าในประวัติ: สถานะแสดงเป็นภาษาไทย */
+const label = (field: string, v: unknown) => (v === null || v === undefined ? "—" : field === "status" ? STATUS_LABELS[v as keyof typeof STATUS_LABELS] ?? String(v) : String(v));
+
 const REC_TONE = { excluded: "red", provisional: "amber", final: "green", unspecified: "slate" } as const;
 
 export function OrdersView() {
@@ -169,7 +172,7 @@ export function OrdersView() {
                           return (
                             <li key={i}>
                               {lineKey && `${lineKey.replace(/^sku:/, "").split("|")[0]} · `}
-                              {changeLabel(field)}: {String(c.from ?? "—")} → {String(c.to ?? "—")}
+                              {changeLabel(field)}: {label(field, c.from)} → {label(field, c.to)}
                             </li>
                           );
                         })}

@@ -233,6 +233,7 @@ test("คำสั่งซื้อ: สถานะ → อัปเดต/ค
   await expect(ord1).toContainText("เงินคืนที่ร้านรับภาระ: 0 → 100");
   await expect(ord1).toContainText("สถานะ: จัดส่งแล้ว → สำเร็จ");
   await noHorizontalOverflow(page);
+  await page.screenshot({ path: test.info().outputPath("review-plan.png"), fullPage: true });
   await page.getByRole("button", { name: "บันทึก 2 คำสั่งซื้อ" }).click();
   await page.getByRole("dialog", { name: "ยืนยันการบันทึก" }).getByRole("button", { name: "บันทึก 2 คำสั่งซื้อ" }).click();
   await expect(page.getByTestId("import-summary").locator("div").nth(1).locator("dd")).toHaveText("2");
@@ -246,6 +247,8 @@ test("คำสั่งซื้อ: สถานะ → อัปเดต/ค
   await page.goto("/orders");
   await page.locator('button[data-order="ORD-1"]').click();
   await expect(page.getByTestId("order-history").locator(":scope > li")).toHaveCount(2);
+  await noHorizontalOverflow(page);
+  await page.screenshot({ path: test.info().outputPath("orders-detail.png"), fullPage: true });
   await expect(page.getByTestId("order-history")).toContainText("เงินคืนที่ร้านรับภาระ: 0 → 100");
   await page.getByRole("button", { name: "ปิด" }).click();
 
@@ -331,6 +334,7 @@ test("รายงานการเงิน: แทนค่าธรรมเ
   await page.getByRole("button", { name: /ยอดโอนไม่ตรง 1/ }).click();
   await page.locator('button[data-order="ORD-1"]').click();
   await expect(page.getByTestId("payout-mismatch")).toContainText("ต่าง");
+  await noHorizontalOverflow(page);
   await expect(page.getByTestId("order-history")).toContainText("รายงานการเงิน");
 
   // ค่าใช้จ่ายที่กรอกเองถูกแทน (ไม่ลบ)
