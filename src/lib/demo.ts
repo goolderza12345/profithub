@@ -5,7 +5,7 @@ import type { Snapshot } from "./db";
 import type { Expense, ExpenseCategory, Product, Sale } from "./types";
 
 /** สุ่มแบบกำหนด seed เพื่อให้ข้อมูล Demo เหมือนเดิมทุกครั้ง */
-function rng(seed: number) {
+export function rng(seed: number) {
   let s = seed >>> 0;
   return () => {
     s = (s + 0x6d2b79f5) >>> 0;

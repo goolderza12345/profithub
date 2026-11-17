@@ -16,6 +16,8 @@ import { FIELD_BY_KEY, SCOPEABLE_FIELDS, type ImportFieldKey, type ScopeableFiel
 import type { ColumnMapping, MappingOptions } from "./mapping";
 import { makeDedupeKey, normalizeChannel, parseAmount, parseDate } from "./parse";
 import type { Table } from "./table";
+import { allocate, fromBaht, toBaht } from "../money/satang";
+import { assignLineKeys, lineFingerprint, type IdentityStrength } from "../orders/identity";
 
 export type SkuDecision =
   | { kind: "product"; productId: string }
@@ -67,6 +69,10 @@ export interface PreviewRow {
   /** กำไรโดยประมาณของบรรทัด (ก่อนหักค่าใช้จ่ายที่บันทึกเอง) ใช้ต้นทุนปัจจุบัน */
   estProfit: number | null;
   dedupeKey: string;
+  /** ตัวตนของบรรทัดในออเดอร์ (ไม่ขึ้นกับลำดับแถว) — ใช้ปันส่วนและจับคู่การอัปเดต */
+  lineKey: string;
+  fingerprint: string;
+  identity: IdentityStrength;
   draft?: SaleDraft;
   cells: string[];
 }
@@ -278,10 +284,16 @@ export function validateImport(table: Table, mapping: ColumnMapping, options: Ma
       netRevenue: 0,
       estProfit: null,
       dedupeKey,
+      lineKey: "",
+      ...(() => {
+        const f = lineFingerprint({ sourceSku, productName: text("productName"), unitPriceSatang: fromBaht(v.unitPrice) });
+        return { fingerprint: f.fp, identity: f.strength };
+      })(),
       cells: dr.cells,
     };
   });
 
+  assignKeys(rows);
   applyOrderLevel(rows, options);
 
   // สร้างรายการที่พร้อมบันทึก
@@ -357,6 +369,18 @@ export function validateImport(table: Table, mapping: ColumnMapping, options: Ma
 
 const orderKey = (r: PreviewRow) => `${r.channel.toLowerCase()}|${r.orderId}`;
 
+/** กำหนด lineKey ต่อออเดอร์ บรรทัดที่ลายนิ้วมือซ้ำเรียงตามเนื้อหา ไม่ใช่ลำดับแถว */
+function assignKeys(rows: PreviewRow[]) {
+  const groups = new Map<string, PreviewRow[]>();
+  for (const r of rows) groups.set(orderKey(r), [...(groups.get(orderKey(r)) ?? []), r]);
+  for (const g of groups.values()) {
+    const keys = assignLineKeys(
+      g.map((r) => ({ fp: r.fingerprint, contentKey: `${r.values.quantity}|${fromBaht(r.values.grossSales)}|${r.cells.join("\u0001")}` })),
+    );
+    g.forEach((r, i) => (r.lineKey = keys[i]));
+  }
+}
+
 /**
  * ช่องที่ผู้ใช้ระบุว่าเป็น "ค่าของทั้งคำสั่งซื้อ" (ไฟล์แสดงซ้ำทุกบรรทัด)
  * - ทุกบรรทัดของคำสั่งซื้อต้องมีค่าเท่ากัน
@@ -396,16 +420,13 @@ function applyOrderLevel(rows: PreviewRow[], options: MappingOptions) {
       }
     }
     if (group.some((r) => r.status === "error")) continue;
-    const gross = group.map((r) => r.values.grossSales);
-    const totalGross = gross.reduce((a, b) => a + b, 0);
+    // ปันส่วนเป็นสตางค์ด้วยวิธีเศษเหลือมากสุด เรียงตาม lineKey (ไม่ขึ้นกับลำดับแถว)
+    const gross = group.map((r) => fromBaht(r.values.grossSales));
+    const totalGross = group.reduce((a, r) => a + r.values.grossSales, 0);
+    const keys = group.map((r) => r.lineKey);
     for (const f of orderFields) {
-      const total = group[0].values[f];
-      let allocated = 0;
-      group.forEach((r, i) => {
-        const share = i === group.length - 1 ? round2(total - allocated) : round2(totalGross > 0 ? (total * gross[i]) / totalGross : total / group.length);
-        allocated = round2(allocated + share);
-        r.values[f] = share;
-      });
+      const shares = allocate(fromBaht(group[0].values[f]), gross, keys);
+      group.forEach((r, i) => (r.values[f] = toBaht(shares[i])));
     }
     const discount = group.reduce((a, r) => a + r.values.discount, 0);
     const refund = group.reduce((a, r) => a + r.values.refund, 0);

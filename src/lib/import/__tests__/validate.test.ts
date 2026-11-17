@@ -191,8 +191,17 @@ describe("ค่าระดับคำสั่งซื้อ: ไม่ห�
     const c = [H, "B1,2026-11-01,Shopee,TS-001,1,100,,,,,10", "B1,2026-11-01,Shopee,MUG-002,1,100,,,,,10", "B1,2026-11-01,Shopee,X-3,1,100,,,,,10"].join("\n");
     const r = run(c, { scopes: { ...opts().scopes, shippingFee: "order" } }, { skuDecisions: { "X-3": { kind: "product", productId: "p1" } } });
     const fees = r.rows.map((x) => x.values.shippingFee);
-    expect(fees).toEqual([3.33, 3.33, 3.34]);
+    // Phase 3 (อนุมัติแล้ว): เศษสตางค์ไปตาม lineKey (sku:MUG-002 เรียงก่อน) ไม่ใช่แถวสุดท้ายอีกต่อไป
+    expect(fees).toEqual([3.33, 3.34, 3.33]);
     expect(fees.reduce((a, b) => a + b, 0)).toBeCloseTo(10, 10);
+  });
+
+  it("สลับลำดับแถวในไฟล์ ผลปันส่วนของแต่ละสินค้าเท่าเดิม", () => {
+    const rows = ["B1,2026-11-01,Shopee,TS-001,1,100,,,,,10", "B1,2026-11-01,Shopee,MUG-002,1,100,,,,,10", "B1,2026-11-01,Shopee,X-3,1,100,,,,,10"];
+    const o = { scopes: { ...opts().scopes, shippingFee: "order" as const } };
+    const c = { skuDecisions: { "X-3": { kind: "product" as const, productId: "p1" } } };
+    const bySku = (csv: string) => Object.fromEntries(run(csv, o, c).rows.map((x) => [x.sourceSku, x.values.shippingFee]));
+    expect(bySku([H, ...rows].join("\n"))).toEqual(bySku([H, ...rows.reverse()].join("\n")));
   });
 
   it("ค่าที่ควรเท่ากันแต่ไม่เท่ากัน → ผิดพลาดทั้งคำสั่งซื้อ", () => {
