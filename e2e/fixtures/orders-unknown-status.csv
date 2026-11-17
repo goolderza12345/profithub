@@ -1,0 +1,3 @@
+order_id,order_date,channel,sku,quantity,unit_price,order_status
+UNK-1,2026-11-12,Shopee,TS-001,1,199,To Ship
+UNK-2,2026-11-12,Shopee,TS-001,1,199,Unpaid

@@ -2,12 +2,15 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import * as store from "@/lib/db";
-import type { ExpenseInput, ImportExtras, ImportOutcome, ProductInput, RestorePointInfo, Snapshot } from "@/lib/db";
+import type { ExpenseInput, ImportExtras, ImportOutcome, OrderImportOutcome, ProductInput, RestorePointInfo, Snapshot } from "@/lib/db";
+import type { PlannedOrder } from "@/lib/orders/plan";
+import { selectRecognizedSales, type RecognitionResult } from "@/lib/orders/recognition";
+import type { Order, OrderRevision, SettlementEntry, SettlementReport } from "@/lib/orders/types";
 import { backupFileName, createBackup, serializeBackup, type BackupFile } from "@/lib/backup";
 import { generateDemoData } from "@/lib/demo";
 import { presetRange, type RangePreset } from "@/lib/dates";
 import type { SaleDraft } from "@/lib/csv";
-import type { DatasetId, DateRange, SkuAlias } from "@/lib/types";
+import type { DatasetId, DateRange, Expense, SkuAlias } from "@/lib/types";
 
 export type { ExpenseInput, ProductInput };
 
@@ -22,8 +25,18 @@ interface RangeState {
 
 export type PersistState = "unsupported" | "persisted" | "not-persisted" | "unknown";
 
-interface DataContextValue extends Omit<Snapshot, "skuAliases"> {
+interface DataContextValue extends Omit<Snapshot, "skuAliases" | "orders" | "orderRevisions" | "settlementReports" | "settlementEntries"> {
   skuAliases: SkuAlias[];
+  orders: Order[];
+  orderRevisions: OrderRevision[];
+  settlementReports: SettlementReport[];
+  settlementEntries: SettlementEntry[];
+  /** รายการขายที่นับในกำไร (ตัดคำสั่งซื้อรอชำระ/ยกเลิก และบรรทัดที่ยกเลิกออก) — ใช้กับหน้ารายงานทุกหน้า */
+  activeSales: Snapshot["sales"];
+  recognition: Omit<RecognitionResult, "recognized">;
+  /** ค่าใช้จ่ายที่นับ (ไม่รวมรายการที่ถูกแทนด้วยรายงานการเงิน) */
+  activeExpenses: Expense[];
+  applyOrderPlan: (planned: PlannedOrder[], fileName: string, extras?: Omit<ImportExtras, "restorePoint">) => Promise<OrderImportOutcome>;
   ready: boolean;
   error: string | null;
   dataset: DatasetId;
@@ -57,7 +70,17 @@ interface DataContextValue extends Omit<Snapshot, "skuAliases"> {
 
 const DataContext = createContext<DataContextValue | null>(null);
 
-const EMPTY: Snapshot = { products: [], sales: [], expenses: [], batches: [], skuAliases: [] };
+const EMPTY: Snapshot = {
+  products: [],
+  sales: [],
+  expenses: [],
+  batches: [],
+  skuAliases: [],
+  orders: [],
+  orderRevisions: [],
+  settlementReports: [],
+  settlementEntries: [],
+};
 
 function readStorage<T>(key: string, fallback: T): T {
   try {
@@ -214,9 +237,25 @@ export function DataProvider({ children }: { children: ReactNode }) {
     [rangeState, today],
   );
 
+  const recognition = useMemo(() => selectRecognizedSales(data.sales, data.orders ?? []), [data.sales, data.orders]);
+  const activeExpenses = useMemo(() => data.expenses.filter((e) => !e.supersededBy), [data.expenses]);
+
   const value: DataContextValue = {
     ...data,
     skuAliases: data.skuAliases ?? [],
+    orders: data.orders ?? [],
+    orderRevisions: data.orderRevisions ?? [],
+    settlementReports: data.settlementReports ?? [],
+    settlementEntries: data.settlementEntries ?? [],
+    activeSales: recognition.recognized,
+    recognition: {
+      excludedPending: recognition.excludedPending,
+      excludedCancelled: recognition.excludedCancelled,
+      excludedCancelledLines: recognition.excludedCancelledLines,
+      provisionalOrders: recognition.provisionalOrders,
+    },
+    activeExpenses,
+    applyOrderPlan: mutate(store.applyOrderPlan),
     ready,
     error,
     dataset,

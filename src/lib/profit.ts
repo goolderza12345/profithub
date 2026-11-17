@@ -23,6 +23,8 @@ import {
   EXPENSE_CATEGORIES,
   OPTIONAL_SALE_FIELDS,
   type OptionalSaleField,
+  ESTIMATE_REASONS,
+  type EstimateReason,
   type DateRange,
   type Expense,
   type ExpenseCategory,
@@ -110,7 +112,11 @@ export interface ProfitSummary {
   incompleteLines: number;
   /** ช่องที่ไม่มีข้อมูลในบางบรรทัด */
   missingFields: OptionalSaleField[];
-  /** ข้อมูลต้นทางไม่ครบ (ไม่มีบางช่อง หรือไม่มีต้นทุน) → ต้องแสดงเป็น "กำไรโดยประมาณ" */
+  /** v1.3: เหตุผลอื่นที่ทำให้เป็นค่าประมาณ (ไม่รู้ผู้รับภาระส่วนลด/เงินคืน, คำสั่งซื้อยังไม่สำเร็จ) */
+  estimateReasons: EstimateReason[];
+  /** v1.3: กำไรอาจสูงขึ้นได้ถึง (บาท) ถ้าส่วนลด/เงินคืนที่ไม่รู้ผู้รับภาระเป็นของแพลตฟอร์ม */
+  estimateUpside: number;
+  /** ข้อมูลต้นทางไม่ครบ (ไม่มีบางช่อง ไม่มีต้นทุน หรือมีเหตุผลข้างบน) → ต้องแสดงเป็น "กำไรโดยประมาณ" */
   isEstimate: boolean;
 }
 
@@ -150,6 +156,7 @@ export function summarize(sales: Sale[], expenses: Expense[], costs: CostLookup)
   });
   const incomplete = sales.filter((s) => (s.missingFields?.length ?? 0) > 0);
   const missingFields = OPTIONAL_SALE_FIELDS.filter((f) => incomplete.some((s) => s.missingFields!.includes(f)));
+  const estimateReasons = ESTIMATE_REASONS.filter((r) => sales.some((s) => s.estimateReasons?.includes(r)));
 
   return {
     orderCount: new Set(sales.map((s) => `${s.channel}|${s.orderId}`)).size,
@@ -173,7 +180,9 @@ export function summarize(sales: Sale[], expenses: Expense[], costs: CostLookup)
     missingCostSkus: [...missing].sort(),
     incompleteLines: incomplete.length,
     missingFields,
-    isEstimate: incomplete.length > 0 || missing.size > 0,
+    estimateReasons,
+    estimateUpside: sum(sales.map((s) => s.estimateUpside ?? 0)),
+    isEstimate: incomplete.length > 0 || missing.size > 0 || estimateReasons.length > 0,
   };
 }
 

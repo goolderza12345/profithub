@@ -88,7 +88,14 @@ export function ImportWizard() {
   function suggestFor(headers: string[], a = adapter): { s: MappingSuggestion; o: MappingOptions } {
     const saved = loadSavedMapping(headerFingerprint(a.id, headers));
     const fromSaved = saved && mappingFromSaved(saved.columns, headers);
-    if (saved && fromSaved) return { s: fromSaved, o: { ...saved.options, fixedChannel: a.channel ?? saved.options.fixedChannel } };
+    if (saved && fromSaved) {
+      // การจับคู่ที่บันทึกจากรุ่นก่อนอาจไม่มีช่องใหม่ → เติมค่าเริ่มต้น
+      const base = defaultOptions(a);
+      return {
+        s: fromSaved,
+        o: { ...base, ...saved.options, scopes: { ...base.scopes, ...saved.options.scopes }, fixedChannel: a.channel ?? saved.options.fixedChannel },
+      };
+    }
     return { s: suggestMapping(headers, a), o: defaultOptions(a) };
   }
 
@@ -163,6 +170,108 @@ export function ImportWizard() {
     });
     setStep("review");
   }
+
+  const renderField = (f: (typeof IMPORT_FIELDS)[number]) => {
+    if (!table) return null;
+                if (f.key === "channel" && adapter.channel) {
+                  return (
+                    <li key={f.key} className="py-3 text-sm">
+                      <span className="font-medium text-slate-800">{f.label}</span>
+                      <span className="ml-2 text-slate-500">{adapter.channel} (ทั้งไฟล์)</span>
+                    </li>
+                  );
+                }
+                const cols = suggestion.mapping[f.key] ?? [];
+                const conf = suggestion.confidence[f.key];
+                const problem = problems.find((p) => p.field === f.key);
+                const required = f.required === true || (f.required === "price" && !suggestion.mapping.unitPrice && !suggestion.mapping.lineTotal);
+                return (
+                  <li key={f.key} className="py-3" data-field={f.key}>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-sm font-medium text-slate-800">
+                        {f.label}
+                        {required && <span className="text-rose-500"> *</span>}
+                      </p>
+                      {conf && <Badge tone={CONF_LABEL[conf].tone}>{CONF_LABEL[conf].text}</Badge>}
+                    </div>
+                    <p className="text-xs text-slate-500">{f.hint}</p>
+                    <div className="mt-2 space-y-2">
+                      {(cols.length ? cols : [-1]).map((col, i) => (
+                        <div key={i} className="flex items-center gap-2">
+                          <select
+                            aria-label={`คอลัมน์สำหรับ ${f.label}${i ? ` (${i + 1})` : ""}`}
+                            className={cn(inputClass, "min-w-0 flex-1", conf === "fuzzy" && "border-amber-400")}
+                            value={col}
+                            onChange={(e) => {
+                              const next = [...cols];
+                              next[i] = Number(e.target.value);
+                              setMapping(f.key, next);
+                            }}
+                          >
+                            <option value={-1}>— ไม่มีในไฟล์ —</option>
+                            {table.headers.map((h, ci) => (
+                              <option key={ci} value={ci}>
+                                {h}
+                                {sample[ci] ? ` (เช่น ${sample[ci].slice(0, 20)})` : ""}
+                              </option>
+                            ))}
+                          </select>
+                          {i > 0 && (
+                            <button
+                              className="grid h-11 w-11 shrink-0 place-items-center rounded-xl text-slate-500 ring-1 ring-slate-200"
+                              aria-label={`ลบคอลัมน์ที่ ${i + 1} ของ ${f.label}`}
+                              onClick={() => setMapping(f.key, cols.filter((_, j) => j !== i))}
+                            >
+                              <X size={18} />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                      {f.multi && cols.length > 0 && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={firstFree(table.headers.length, suggestion.mapping).length === 0}
+                          onClick={() => setMapping(f.key, [...cols, ...firstFree(table.headers.length, suggestion.mapping)])}
+                        >
+                          <Plus size={15} /> รวมอีกคอลัมน์
+                        </Button>
+                      )}
+                      {f.key === "channel" && !cols.length && (
+                        <label className="block text-xs text-slate-600">
+                          ช่องทางเดียวสำหรับทั้งไฟล์
+                          <select
+                            className={cn(inputClass, "mt-1")}
+                            value={options.fixedChannel ?? ""}
+                            onChange={(e) => setOptions({ ...options, fixedChannel: e.target.value || null })}
+                          >
+                            <option value="">— เลือกช่องทาง —</option>
+                            {CHANNEL_OPTIONS.map((c) => (
+                              <option key={c} value={c}>
+                                {c}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
+                      {isScopeable(f.key) && cols.length > 0 && (
+                        <div className="text-xs text-slate-600">
+                          <p className="mb-1">ค่านี้ในไฟล์เป็นของ</p>
+                          <Segmented<AmountScope>
+                            value={options.scopes[f.key]}
+                            onChange={(v) => setOptions({ ...options, scopes: { ...options.scopes, [f.key]: v } })}
+                            options={[
+                              { value: "line", label: "แต่ละบรรทัด" },
+                              { value: "order", label: "ทั้งคำสั่งซื้อ (ซ้ำทุกบรรทัด)" },
+                            ]}
+                          />
+                        </div>
+                      )}
+                    </div>
+                    {problem && <p className="mt-1 text-xs text-rose-600">{problem.message}</p>}
+                  </li>
+                );
+  };
 
   return (
     <div>
@@ -291,107 +400,15 @@ export function ImportWizard() {
               · ถ้าเลือกคอลัมน์แล้วแต่ช่องว่าง จะถือว่าเป็น 0
             </p>
             <ul className="mt-3 divide-y divide-slate-100">
-              {IMPORT_FIELDS.map((f) => {
-                if (f.key === "channel" && adapter.channel) {
-                  return (
-                    <li key={f.key} className="py-3 text-sm">
-                      <span className="font-medium text-slate-800">{f.label}</span>
-                      <span className="ml-2 text-slate-500">{adapter.channel} (ทั้งไฟล์)</span>
-                    </li>
-                  );
-                }
-                const cols = suggestion.mapping[f.key] ?? [];
-                const conf = suggestion.confidence[f.key];
-                const problem = problems.find((p) => p.field === f.key);
-                const required = f.required === true || (f.required === "price" && !suggestion.mapping.unitPrice && !suggestion.mapping.lineTotal);
-                return (
-                  <li key={f.key} className="py-3" data-field={f.key}>
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <p className="text-sm font-medium text-slate-800">
-                        {f.label}
-                        {required && <span className="text-rose-500"> *</span>}
-                      </p>
-                      {conf && <Badge tone={CONF_LABEL[conf].tone}>{CONF_LABEL[conf].text}</Badge>}
-                    </div>
-                    <p className="text-xs text-slate-500">{f.hint}</p>
-                    <div className="mt-2 space-y-2">
-                      {(cols.length ? cols : [-1]).map((col, i) => (
-                        <div key={i} className="flex items-center gap-2">
-                          <select
-                            aria-label={`คอลัมน์สำหรับ ${f.label}${i ? ` (${i + 1})` : ""}`}
-                            className={cn(inputClass, "min-w-0 flex-1", conf === "fuzzy" && "border-amber-400")}
-                            value={col}
-                            onChange={(e) => {
-                              const next = [...cols];
-                              next[i] = Number(e.target.value);
-                              setMapping(f.key, next);
-                            }}
-                          >
-                            <option value={-1}>— ไม่มีในไฟล์ —</option>
-                            {table.headers.map((h, ci) => (
-                              <option key={ci} value={ci}>
-                                {h}
-                                {sample[ci] ? ` (เช่น ${sample[ci].slice(0, 20)})` : ""}
-                              </option>
-                            ))}
-                          </select>
-                          {i > 0 && (
-                            <button
-                              className="grid h-11 w-11 shrink-0 place-items-center rounded-xl text-slate-500 ring-1 ring-slate-200"
-                              aria-label={`ลบคอลัมน์ที่ ${i + 1} ของ ${f.label}`}
-                              onClick={() => setMapping(f.key, cols.filter((_, j) => j !== i))}
-                            >
-                              <X size={18} />
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                      {f.multi && cols.length > 0 && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={firstFree(table.headers.length, suggestion.mapping).length === 0}
-                          onClick={() => setMapping(f.key, [...cols, ...firstFree(table.headers.length, suggestion.mapping)])}
-                        >
-                          <Plus size={15} /> รวมอีกคอลัมน์
-                        </Button>
-                      )}
-                      {f.key === "channel" && !cols.length && (
-                        <label className="block text-xs text-slate-600">
-                          ช่องทางเดียวสำหรับทั้งไฟล์
-                          <select
-                            className={cn(inputClass, "mt-1")}
-                            value={options.fixedChannel ?? ""}
-                            onChange={(e) => setOptions({ ...options, fixedChannel: e.target.value || null })}
-                          >
-                            <option value="">— เลือกช่องทาง —</option>
-                            {CHANNEL_OPTIONS.map((c) => (
-                              <option key={c} value={c}>
-                                {c}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                      )}
-                      {isScopeable(f.key) && cols.length > 0 && (
-                        <div className="text-xs text-slate-600">
-                          <p className="mb-1">ค่านี้ในไฟล์เป็นของ</p>
-                          <Segmented<AmountScope>
-                            value={options.scopes[f.key]}
-                            onChange={(v) => setOptions({ ...options, scopes: { ...options.scopes, [f.key]: v } })}
-                            options={[
-                              { value: "line", label: "แต่ละบรรทัด" },
-                              { value: "order", label: "ทั้งคำสั่งซื้อ (ซ้ำทุกบรรทัด)" },
-                            ]}
-                          />
-                        </div>
-                      )}
-                    </div>
-                    {problem && <p className="mt-1 text-xs text-rose-600">{problem.message}</p>}
-                  </li>
-                );
-              })}
+              {IMPORT_FIELDS.filter((f) => f.group !== "advanced").map(renderField)}
             </ul>
+            <details className="mt-2 rounded-xl ring-1 ring-slate-200" open={IMPORT_FIELDS.some((f) => f.group === "advanced" && suggestion.mapping[f.key]?.length)}>
+              <summary className="cursor-pointer px-3 py-3 text-sm font-medium text-slate-800">
+                ข้อมูลเพิ่มเติม (สถานะ ส่วนลดแพลตฟอร์ม เงินคืน ค่าธรรมเนียมแยกประเภท)
+              </summary>
+              <p className="px-3 text-xs text-slate-500">ไม่บังคับ — ช่วยให้กำไรถูกต้องขึ้น และอัปเดตคำสั่งซื้อเดิมได้เมื่อนำเข้าไฟล์ใหม่</p>
+              <ul className="divide-y divide-slate-100 px-3">{IMPORT_FIELDS.filter((f) => f.group === "advanced").map(renderField)}</ul>
+            </details>
 
             <label className="mt-3 flex items-start gap-2 rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
               <input

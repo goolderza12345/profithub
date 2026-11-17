@@ -3,6 +3,7 @@ import type { SaleDraft } from "./csv";
 import { newId } from "./id";
 import type { DatasetId, Expense, ImportBatch, Product, Sale, SkuAlias } from "./types";
 import type { Order, OrderRevision, SettlementEntry, SettlementReport } from "./orders/types";
+import type { PlannedOrder } from "./orders/plan";
 
 export interface Snapshot {
   products: Product[];
@@ -438,16 +439,164 @@ export async function deleteSkuAlias(dataset: DatasetId, alias: string): Promise
   await db.delete("skuAliases", alias);
 }
 
+export const BATCH_LOCKED_MESSAGE =
+  "ชุดนำเข้านี้อัปเดตคำสั่งซื้อที่นำเข้าก่อนหน้า หรือคำสั่งซื้อที่สร้างถูกอัปเดตภายหลังแล้ว — ลบทีละชุดไม่ได้ เพื่อไม่ให้ประวัติขาดตอน กรุณาใช้จุดกู้คืนแทน";
+
+/**
+ * ลบชุดนำเข้า: ลบได้เฉพาะชุดที่ "สร้าง" ข้อมูลอย่างเดียว
+ * ชุดที่อัปเดตคำสั่งซื้อของชุดอื่น หรือคำสั่งซื้อที่สร้างถูกอัปเดตภายหลัง → ปฏิเสธ (ใช้จุดกู้คืนแทน)
+ */
 export async function deleteBatch(dataset: DatasetId, batchId: string): Promise<number> {
   const db = await getDB(dataset);
   const tx = db.transaction(ALL_STORES, "readwrite") as RWTx;
-  const keys = await tx.objectStore("sales").index("batchId").getAllKeys(batchId);
-  const batch = await tx.objectStore("batches").get(batchId);
-  await addRestorePoint(tx, `ก่อนลบชุดนำเข้า "${batch?.fileName ?? batchId}"`);
-  for (const k of keys) await tx.objectStore("sales").delete(k);
-  await tx.objectStore("batches").delete(batchId);
-  await tx.done;
-  return keys.length;
+  try {
+    const revisions = await tx.objectStore("orderRevisions").index("batchId").getAll(batchId);
+    if (revisions.some((r) => r.kind !== "create")) throw new Error(BATCH_LOCKED_MESSAGE);
+    const created = revisions.map((r) => r.orderKey);
+    for (const key of created) {
+      const o = await tx.objectStore("orders").get(key);
+      if (o && o.revisionCount > 1) throw new Error(BATCH_LOCKED_MESSAGE);
+    }
+    const keys = await tx.objectStore("sales").index("batchId").getAllKeys(batchId);
+    const batch = await tx.objectStore("batches").get(batchId);
+    await addRestorePoint(tx, `ก่อนลบชุดนำเข้า "${batch?.fileName ?? batchId}"`);
+    for (const k of keys) await tx.objectStore("sales").delete(k);
+    for (const key of created) {
+      await tx.objectStore("orders").delete(key);
+      for (const rk of await tx.objectStore("orderRevisions").index("orderKey").getAllKeys(key)) await tx.objectStore("orderRevisions").delete(rk);
+    }
+    await tx.objectStore("batches").delete(batchId);
+    await tx.done;
+    return keys.length;
+  } catch (e) {
+    try {
+      tx.abort();
+    } catch {
+      /* ถูกยกเลิกแล้ว */
+    }
+    await tx.done.catch(() => undefined);
+    throw e;
+  }
+}
+
+export interface OrderImportOutcome {
+  batchId: string | null;
+  ordersCreated: number;
+  ordersUpdated: number;
+  ordersAdopted: number;
+  salesAdded: number;
+  salesUpdated: number;
+  createdProducts: number;
+  savedAliases: number;
+  restorePointCreated: boolean;
+}
+
+export const STALE_PLAN_MESSAGE = "ข้อมูลในระบบเปลี่ยนไประหว่างการตรวจสอบ — ไม่มีข้อมูลใดถูกบันทึก กรุณาตรวจสอบไฟล์อีกครั้ง";
+
+/**
+ * บันทึกแผนการเปลี่ยนแปลงคำสั่งซื้อใน transaction เดียว (all-or-nothing) พร้อมจุดกู้คืน
+ * - ตรวจว่าข้อมูลไม่เปลี่ยนไปหลังสร้างแผน (มิฉะนั้นยกเลิกทั้งหมด)
+ * - บรรทัดใหม่: อ่านต้นทุนปัจจุบันจากฐานข้อมูลเป็น snapshot · บรรทัดเดิม: คงต้นทุนเดิม
+ * - บันทึกประวัติ (OrderRevision) ทุกคำสั่งซื้อที่เปลี่ยน
+ */
+export async function applyOrderPlan(
+  dataset: DatasetId,
+  planned: PlannedOrder[],
+  fileName: string,
+  extras: Omit<ImportExtras, "restorePoint"> = {},
+): Promise<OrderImportOutcome> {
+  const db = await getDB(dataset);
+  const now = new Date().toISOString();
+  const batch: ImportBatch = { id: newId(), fileName: fileName.slice(0, 255), importedAt: now, rowCount: 0 };
+  if (extras.adapterId) batch.adapterId = extras.adapterId.slice(0, 40);
+  if (extras.fileHash) batch.fileHash = extras.fileHash.slice(0, 64);
+  const out: OrderImportOutcome = {
+    batchId: null,
+    ordersCreated: 0,
+    ordersUpdated: 0,
+    ordersAdopted: 0,
+    salesAdded: 0,
+    salesUpdated: 0,
+    createdProducts: 0,
+    savedAliases: 0,
+    restorePointCreated: false,
+  };
+  const toApply = planned.filter((p) => p.apply && p.applicable);
+  const tx = db.transaction(ALL_STORES, "readwrite") as RWTx;
+  try {
+    if (toApply.length) out.restorePointCreated = await addRestorePoint(tx, `ก่อนนำเข้า "${batch.fileName}"`);
+    const products = tx.objectStore("products");
+    for (const np of extras.newProducts ?? []) {
+      const sku = np.sku.trim().toUpperCase();
+      if (await products.index("sku").getKey(sku)) throw new Error(`SKU "${sku}" มีอยู่แล้วในระบบ — ยกเลิกการนำเข้าทั้งหมด`);
+      await products.add({ id: newId(), sku, name: np.name.trim(), unitCost: np.unitCost, createdAt: now, updatedAt: now });
+      out.createdProducts++;
+    }
+    for (const a of extras.aliases ?? []) {
+      if (!(await products.get(a.productId))) throw new Error("ไม่พบสินค้าที่จับคู่ไว้ — ยกเลิกการนำเข้าทั้งหมด");
+      await tx.objectStore("skuAliases").put({ alias: a.alias.trim().toUpperCase(), productId: a.productId, createdAt: now });
+      out.savedAliases++;
+    }
+    const sales = tx.objectStore("sales");
+    const orders = tx.objectStore("orders");
+    for (const p of toApply) {
+      const current = await orders.get(p.key);
+      const expectedPrev = p.order.revisionCount - 1;
+      if ((current?.revisionCount ?? 0) !== (p.kind === "new" || p.kind === "adopt" ? 0 : expectedPrev) || (p.kind === "new" && current)) {
+        throw new Error(STALE_PLAN_MESSAGE);
+      }
+      const ids = new Map<string, string>();
+      for (const planSale of p.sales) {
+        const isNew = planSale.id.startsWith("new:");
+        const id = isNew ? newId() : planSale.id;
+        ids.set(planSale.id, id);
+        const sale = { ...planSale, id, batchId: isNew ? batch.id : planSale.batchId };
+        if (isNew) {
+          const product = await products.index("sku").get(sale.sku.toUpperCase());
+          if (!product) throw new Error(`ไม่พบสินค้า ${sale.sku} — ยกเลิกการนำเข้าทั้งหมด`);
+          sale.unitCost = product.unitCost;
+          await sales.add(sale);
+          out.salesAdded++;
+        } else {
+          const prev = await sales.get(id);
+          if (!prev) throw new Error(STALE_PLAN_MESSAGE);
+          // ต้นทุน ณ วันนำเข้าเดิมห้ามเปลี่ยน
+          if (prev.unitCost !== undefined) sale.unitCost = prev.unitCost;
+          else delete sale.unitCost;
+          await sales.put(sale);
+          out.salesUpdated++;
+        }
+      }
+      const order: Order = {
+        ...p.order,
+        lastBatchId: batch.id,
+        firstBatchId: current?.firstBatchId ?? batch.id,
+        updatedAt: now,
+        createdAt: current?.createdAt ?? now,
+        lines: p.order.lines.map((l) => ({ ...l, saleId: ids.get(l.saleId) ?? l.saleId })),
+      };
+      await orders.put(order);
+      await tx.objectStore("orderRevisions").add({ orderKey: p.key, batchId: batch.id, appliedAt: now, kind: p.revisionKind, changes: p.changes.map((c) => ({ path: c.lineKey ? `${c.lineKey}.${c.field}` : c.field, from: c.from, to: c.to })) });
+      if (p.kind === "new") out.ordersCreated++;
+      else if (p.kind === "adopt") out.ordersAdopted++;
+      else out.ordersUpdated++;
+    }
+    batch.rowCount = out.salesAdded + out.salesUpdated;
+    if (toApply.length) {
+      await tx.objectStore("batches").add(batch);
+      out.batchId = batch.id;
+    }
+    await tx.done;
+    return out;
+  } catch (e) {
+    try {
+      tx.abort();
+    } catch {
+      /* ถูกยกเลิกแล้ว */
+    }
+    await tx.done.catch(() => undefined);
+    throw e;
+  }
 }
 
 export type ExpenseInput = Omit<Expense, "id" | "createdAt">;

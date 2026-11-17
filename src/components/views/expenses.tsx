@@ -14,7 +14,7 @@ import { RangeFilter } from "../range-filter";
 import { Badge, Button, Card, ConfirmDialog, EmptyState, Field, inputClass, Loading, Modal, PageHeader } from "../ui";
 
 export function ExpensesView() {
-  const { ready, expenses, sales, range, saveExpense, deleteExpense } = useData();
+  const { ready, expenses, activeSales: sales, range, saveExpense, deleteExpense } = useData();
   const [editing, setEditing] = useState<Expense | "new" | null>(null);
   const [deleting, setDeleting] = useState<Expense | null>(null);
   const [category, setCategory] = useState<ExpenseCategory | "all">("all");

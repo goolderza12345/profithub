@@ -9,7 +9,7 @@ import { useData } from "../data-provider";
 import { Button, Card, ConfirmDialog, EmptyState, Field, inputClass, Loading, Modal, PageHeader } from "../ui";
 
 export function ProductsView() {
-  const { ready, products, sales, saveProduct, deleteProduct } = useData();
+  const { ready, products, activeSales: sales, saveProduct, deleteProduct } = useData();
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<Product | "new" | null>(null);
   const [deleting, setDeleting] = useState<Product | null>(null);

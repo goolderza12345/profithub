@@ -11,7 +11,7 @@ import { RangeFilter } from "../range-filter";
 import { Badge, Button, Card, Loading, PageHeader } from "../ui";
 
 export function ReportsView() {
-  const { ready, sales, expenses, products, range, dataset } = useData();
+  const { ready, activeSales: sales, activeExpenses: expenses, products, range, dataset } = useData();
   const [last, setLast] = useState<ReportKind | null>(null);
 
   const filtered = useMemo(

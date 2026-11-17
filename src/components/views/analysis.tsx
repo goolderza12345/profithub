@@ -13,7 +13,7 @@ import { buttonClass, Card, cn, EmptyState, Loading, PageHeader, Segmented } fro
 type Tab = "product" | "channel" | "loss";
 
 export function AnalysisView() {
-  const { ready, sales, expenses, products, range } = useData();
+  const { ready, activeSales: sales, activeExpenses: expenses, products, range } = useData();
   const [tab, setTab] = useState<Tab>("product");
 
   const v = useMemo(() => {

@@ -16,10 +16,41 @@ export type ImportFieldKey =
   | "refund"
   | "returnedQty"
   | "platformFee"
-  | "shippingFee";
+  | "shippingFee"
+  // v1.3 ข้อมูลเพิ่มเติม
+  | "orderStatus"
+  | "statusUpdatedAt"
+  | "lineId"
+  | "platformSubsidy"
+  | "unknownDiscount"
+  | "refundPlatform"
+  | "refundUnknown"
+  | "returnedDamagedQty"
+  | "notReturnedQty"
+  | "commissionFee"
+  | "transactionFee"
+  | "serviceFee"
+  | "feeRefunded"
+  | "shippingRefunded"
+  | "returnShippingCost";
 
 /** ช่องจำนวนเงินที่อาจเป็น "ค่าระดับคำสั่งซื้อ" (ซ้ำทุกบรรทัดของคำสั่งซื้อเดียวกัน) */
-export const SCOPEABLE_FIELDS = ["discount", "refund", "platformFee", "shippingFee"] as const;
+export const SCOPEABLE_FIELDS = [
+  "discount",
+  "refund",
+  "platformFee",
+  "shippingFee",
+  "platformSubsidy",
+  "unknownDiscount",
+  "refundPlatform",
+  "refundUnknown",
+  "commissionFee",
+  "transactionFee",
+  "serviceFee",
+  "feeRefunded",
+  "shippingRefunded",
+  "returnShippingCost",
+] as const;
 export type ScopeableField = (typeof SCOPEABLE_FIELDS)[number];
 export type AmountScope = "line" | "order";
 
@@ -32,8 +63,12 @@ export interface ImportFieldDef {
   required: boolean | "price" | "channel";
   /** รวมหลายคอลัมน์ได้ (เช่น ค่าธรรมเนียมหลายประเภท) */
   multi: boolean;
-  /** ช่องใน Sale ที่ถ้าไม่มีคอลัมน์ จะถูกบันทึกว่า "ไม่มีข้อมูล" */
+  /** ช่องใน Sale ที่ช่องนี้เป็นแหล่งข้อมูล — ถ้าไม่มีคอลัมน์ใดของช่องนั้นเลย จะถูกบันทึกว่า "ไม่มีข้อมูล" */
   optionalField?: OptionalSaleField;
+  /** main = แสดงเสมอ, advanced = อยู่ในส่วน "ข้อมูลเพิ่มเติม" */
+  group?: "main" | "advanced";
+  /** คำที่ถ้าอยู่ในหัวคอลัมน์ ห้ามเดา (fuzzy) ว่าเป็นช่องนี้ — กันเดาส่วนลดของแพลตฟอร์มเป็นส่วนลดของร้าน */
+  fuzzyExclude?: string[];
   /** เป็นรายการหัก (ติดลบในไฟล์ได้ถ้าผู้ใช้เลือกให้ตีความเป็นรายการหัก) */
   deduction: boolean;
   /** ชื่อหัวคอลัมน์ทั่วไปที่ใช้เดา (ไม่ใช่รูปแบบเฉพาะของแพลตฟอร์มใด) */
@@ -131,6 +166,7 @@ export const IMPORT_FIELDS: ImportFieldDef[] = [
     optionalField: "discount",
     deduction: true,
     aliases: ["discount", "ส่วนลด", "ส่วนลดที่ร้านออก", "seller discount", "seller voucher"],
+    fuzzyExclude: ["แพลตฟอร์ม", "platform", "shopee", "lazada", "tiktok", "coin", "เหรียญ", "subsid", "สนับสนุน"],
   },
   {
     key: "refund",
@@ -142,6 +178,7 @@ export const IMPORT_FIELDS: ImportFieldDef[] = [
     optionalField: "refund",
     deduction: true,
     aliases: ["refund", "เงินคืน", "เงินคืนลูกค้า", "refund amount", "ยอดคืนเงิน"],
+    fuzzyExclude: ["แพลตฟอร์ม", "platform", "ค่าธรรมเนียม", "fee", "ค่าส่ง", "shipping"],
   },
   {
     key: "returnedQty",
@@ -176,7 +213,34 @@ export const IMPORT_FIELDS: ImportFieldDef[] = [
     deduction: true,
     aliases: ["shipping_fee", "ค่าขนส่งที่ร้านออก", "ค่าขนส่ง", "seller shipping fee", "shipping fee paid by seller"],
   },
+  // ---------- v1.3: ข้อมูลเพิ่มเติม (ไม่บังคับ) ----------
+  adv("orderStatus", "สถานะคำสั่งซื้อ", "รอชำระและยกเลิกจะไม่นับในกำไร — สถานะที่ระบบไม่รู้จักต้องจับคู่เอง", "text", ["order_status", "สถานะคำสั่งซื้อ", "สถานะ", "status", "order status"]),
+  adv("statusUpdatedAt", "เวลาอัปเดตสถานะ", "ใช้กันไม่ให้ไฟล์เก่าบันทึกทับข้อมูลใหม่", "text", ["status_updated_at", "เวลาอัปเดตสถานะ", "updated at", "update time"]),
+  adv("lineId", "รหัสบรรทัดสินค้า", "รหัสของแต่ละรายการสินค้าในคำสั่งซื้อจากแพลตฟอร์ม (ถ้ามี) ช่วยจับคู่การอัปเดตได้แม่นยำ", "text", ["line_id", "รหัสบรรทัด", "item id", "line item id"]),
+  adv("platformSubsidy", "ส่วนลดที่แพลตฟอร์มสนับสนุน", "โค้ด/เหรียญ/แคมเปญที่แพลตฟอร์มออกเงิน — ไม่หักจากรายได้ร้าน", "money", ["platform_subsidy", "ส่วนลดจากแพลตฟอร์ม", "ส่วนลดที่แพลตฟอร์มสนับสนุน"]),
+  adv("unknownDiscount", "ส่วนลดที่ไม่รู้ผู้รับภาระ", "ระบบคิดเป็นของร้าน (ระมัดระวัง) และแสดงว่ากำไรอาจสูงขึ้นได้เท่าใด", "money", ["unknown_discount", "ส่วนลดไม่ระบุผู้รับภาระ"], "discount"),
+  adv("refundPlatform", "เงินคืนที่แพลตฟอร์มรับภาระ", "ไม่กระทบรายได้ร้าน", "money", ["refund_platform", "เงินคืนที่แพลตฟอร์มรับภาระ"]),
+  adv("refundUnknown", "เงินคืนที่ไม่รู้ผู้รับภาระ", "ระบบคิดเป็นของร้าน (ระมัดระวัง)", "money", ["refund_unknown", "เงินคืนไม่ระบุผู้รับภาระ"], "refund"),
+  adv("returnedDamagedQty", "ชิ้นที่คืนแต่ชำรุด", "ได้สินค้าคืนแต่ขายต่อไม่ได้ — ยังคิดต้นทุนสินค้า", "int", ["returned_damaged_qty", "ชิ้นที่คืนแต่ชำรุด"]),
+  adv("notReturnedQty", "ชิ้นที่ไม่ต้องส่งคืน", "คืนเงินโดยลูกค้าไม่ต้องส่งสินค้าคืน — ยังคิดต้นทุนสินค้า", "int", ["not_returned_qty", "ชิ้นที่ไม่ต้องส่งคืน"]),
+  adv("commissionFee", "ค่าคอมมิชชัน", "", "money", ["commission_fee", "ค่าคอมมิชชัน"], "platformFee"),
+  adv("transactionFee", "ค่าธรรมเนียมธุรกรรม", "", "money", ["transaction_fee", "ค่าธรรมเนียมธุรกรรม"], "platformFee"),
+  adv("serviceFee", "ค่าบริการ", "", "money", ["service_fee", "ค่าบริการ"], "platformFee"),
+  adv("feeRefunded", "ค่าธรรมเนียมที่ได้คืน", "เช่น เมื่อคืนเงินลูกค้า แพลตฟอร์มคืนค่าธรรมเนียมให้ร้าน", "money", ["fee_refunded", "ค่าธรรมเนียมที่ได้คืน"]),
+  adv("shippingRefunded", "ค่าส่งที่ได้คืน", "", "money", ["shipping_refunded", "ค่าส่งที่ได้คืน"]),
+  adv("returnShippingCost", "ค่าส่งสินค้าคืนที่ร้านจ่าย", "", "money", ["return_shipping_cost", "ค่าส่งสินค้าคืน"]),
 ];
+
+function adv(
+  key: ImportFieldKey,
+  label: string,
+  hint: string,
+  kind: ImportFieldDef["kind"],
+  aliases: string[],
+  optionalField?: OptionalSaleField,
+): ImportFieldDef {
+  return { key, label, hint, kind, required: false, multi: kind === "money", deduction: kind === "money", aliases, group: "advanced", ...(optionalField ? { optionalField } : {}) };
+}
 
 export const FIELD_BY_KEY = Object.fromEntries(IMPORT_FIELDS.map((f) => [f.key, f])) as Record<ImportFieldKey, ImportFieldDef>;
 
@@ -193,4 +257,19 @@ export const TEMPLATE_HEADERS: Partial<Record<ImportFieldKey, string>> = {
   returnedQty: "returned_qty",
   platformFee: "platform_fee",
   shippingFee: "shipping_fee",
+  orderStatus: "order_status",
+  statusUpdatedAt: "status_updated_at",
+  lineId: "line_id",
+  platformSubsidy: "platform_subsidy",
+  unknownDiscount: "unknown_discount",
+  refundPlatform: "refund_platform",
+  refundUnknown: "refund_unknown",
+  returnedDamagedQty: "returned_damaged_qty",
+  notReturnedQty: "not_returned_qty",
+  commissionFee: "commission_fee",
+  transactionFee: "transaction_fee",
+  serviceFee: "service_fee",
+  feeRefunded: "fee_refunded",
+  shippingRefunded: "shipping_refunded",
+  returnShippingCost: "return_shipping_cost",
 };

@@ -72,7 +72,8 @@ export function suggestMapping(headers: string[], adapter: ImportAdapter): Mappi
   for (const f of IMPORT_FIELDS) {
     if (mapping[f.key]) continue;
     const names = f.aliases.map(normalizeHeader).filter((n) => n.length >= 4);
-    const i = find((h) => names.some((n) => h.includes(n)));
+    const exclude = (f.fuzzyExclude ?? []).map((x) => x.toLowerCase());
+    const i = find((h) => names.some((n) => h.includes(n)) && !exclude.some((x) => h.includes(x)));
     if (i >= 0) take(f.key, i, "fuzzy");
   }
   // ช่องทางคงที่ของแพลตฟอร์ม: ไม่ใช้คอลัมน์ช่องทาง

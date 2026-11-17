@@ -12,6 +12,7 @@ import {
   Menu,
   Package,
   Receipt,
+  ReceiptText,
   Settings,
   TrendingUp,
   Upload,
@@ -22,6 +23,7 @@ import { Button, cn, Modal } from "./ui";
 const NAV = [
   { href: "/", label: "ภาพรวม", icon: LayoutDashboard },
   { href: "/analysis", label: "วิเคราะห์กำไร", icon: BarChart3 },
+  { href: "/orders", label: "คำสั่งซื้อ", icon: ReceiptText },
   { href: "/products", label: "สินค้า", icon: Package },
   { href: "/import", label: "นำเข้ายอดขาย", icon: Upload },
   { href: "/expenses", label: "ค่าใช้จ่าย", icon: Receipt },

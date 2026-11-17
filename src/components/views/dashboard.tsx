@@ -5,7 +5,7 @@ import { useMemo } from "react";
 import { AlertTriangle, ArrowRight, Coins, FlaskConical, Package, Percent, Receipt, ShieldCheck, TrendingUp, Upload, Wallet, Info } from "lucide-react";
 import { buildCostLookup, dailySeries, filterByRange, lossProducts, summarize } from "@/lib/profit";
 import { formatBaht, formatNumber, formatPercent } from "@/lib/format";
-import { OPTIONAL_FIELD_LABELS } from "@/lib/types";
+import { ESTIMATE_REASON_LABELS, OPTIONAL_FIELD_LABELS } from "@/lib/types";
 import { useData } from "../data-provider";
 import { DailyChart } from "../charts";
 import { RangeFilter } from "../range-filter";
@@ -13,7 +13,7 @@ import { StatCard } from "../stat-card";
 import { Button, buttonClass, Card, EmptyState, Loading, PageHeader } from "../ui";
 
 export function DashboardView() {
-  const { ready, products, sales, expenses, range, dataset, startDemo, lastBackupAt, backupDue } = useData();
+  const { ready, products, sales: allSales, activeSales: sales, activeExpenses: expenses, range, dataset, startDemo, lastBackupAt, backupDue, recognition } = useData();
 
   const view = useMemo(() => {
     const s = filterByRange(sales, range);
@@ -28,7 +28,8 @@ export function DashboardView() {
 
   if (!ready) return <Loading />;
 
-  if (sales.length === 0 && expenses.length === 0) {
+  // ว่างจริงเมื่อไม่มีรายการขายเลย (แม้ทุกคำสั่งซื้อจะรอชำระ/ยกเลิก ก็ไม่ถือว่าว่าง)
+  if (allSales.length === 0 && expenses.length === 0) {
     return (
       <>
         <PageHeader title="ภาพรวมร้านค้า" description="เริ่มต้นใช้งาน ProfitHub ใน 3 ขั้นตอน" />
@@ -78,6 +79,24 @@ export function DashboardView() {
             <b>กำไรโดยประมาณ</b> — {formatNumber(s.incompleteLines)} รายการขายมาจากไฟล์ที่ไม่มีข้อมูล{" "}
             {s.missingFields.map((f) => OPTIONAL_FIELD_LABELS[f]).join(", ")} (ระบบนับเป็น 0) ตัวเลขจริงอาจต่ำกว่านี้
           </p>
+        </div>
+      )}
+
+      {(s.estimateReasons.length > 0 || recognition.excludedPending + recognition.excludedCancelled + recognition.excludedCancelledLines > 0) && (
+        <div className="mb-4 space-y-1 rounded-2xl bg-slate-100 p-4 text-sm text-slate-700" data-testid="order-notice">
+          {s.estimateReasons.map((r) => (
+            <p key={r}>• {ESTIMATE_REASON_LABELS[r]}</p>
+          ))}
+          {s.estimateUpside > 0 && <p>• กำไรอาจสูงขึ้นได้ถึง {formatBaht(s.estimateUpside)} ถ้าส่วนลด/เงินคืนที่ไม่รู้ผู้รับภาระเป็นของแพลตฟอร์ม</p>}
+          {recognition.excludedPending + recognition.excludedCancelled > 0 && (
+            <p>
+              • ไม่นับในกำไร: รอชำระ {formatNumber(recognition.excludedPending)} · ยกเลิก {formatNumber(recognition.excludedCancelled)} คำสั่งซื้อ (ทุกช่วงเวลา) —{" "}
+              <Link href="/orders" className="font-medium underline">
+                ดูคำสั่งซื้อ
+              </Link>
+            </p>
+          )}
+          {recognition.excludedCancelledLines > 0 && <p>• ไม่นับบรรทัดสินค้าที่ยกเลิก {formatNumber(recognition.excludedCancelledLines)} บรรทัด</p>}
         </div>
       )}
 

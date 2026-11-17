@@ -71,3 +71,22 @@ with open(path("legacy.xls"), "wb") as f:
     f.write(bytes([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) + b"\x00" * 504)
 
 print("fixtures written to", HERE)
+
+# 8) Phase 3: คำสั่งซื้อที่มีสถานะ — นำเข้ารอบแรก / รอบอัปเดต (คืนเงิน) / ไฟล์เก่า / สถานะที่ระบบไม่รู้จัก
+ORDER_HEAD = "order_id,order_date,channel,sku,quantity,unit_price,discount,refund,returned_qty,platform_fee,shipping_fee,order_status,not_returned_qty,fee_refunded"
+def write_orders(name, lines):
+    with open(path(name), "w", encoding="utf-8", newline="") as f:
+        f.write("\n".join([ORDER_HEAD] + lines) + "\n")
+
+write_orders("orders-v1-shipped.csv", [
+    "ORD-1,2026-11-10,Shopee,TS-001,2,199,20,0,0,23.88,0,shipped,0,0",
+    "ORD-2,2026-11-11,Shopee,MUG-002,1,250,0,0,0,15,0,shipped,0,0",
+])
+write_orders("orders-v2-completed-refund.csv", [
+    "ORD-1,2026-11-10,Shopee,TS-001,2,199,20,100,0,23.88,0,completed,1,5",
+    "ORD-2,2026-11-11,Shopee,MUG-002,1,250,0,0,0,15,0,completed,0,0",
+])
+with open(path("orders-unknown-status.csv"), "w", encoding="utf-8", newline="") as f:
+    f.write("order_id,order_date,channel,sku,quantity,unit_price,order_status\n"
+            "UNK-1,2026-11-12,Shopee,TS-001,1,199,To Ship\n"
+            "UNK-2,2026-11-12,Shopee,TS-001,1,199,Unpaid\n")
