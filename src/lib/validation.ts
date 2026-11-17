@@ -1,7 +1,7 @@
 /**
  * ตรวจความถูกต้องของข้อมูลแต่ละประเภท ใช้ร่วมกันทั้งตอนนำเข้า CSV, บันทึกฟอร์ม และกู้คืน Backup
  */
-import { EXPENSE_CATEGORIES, OPTIONAL_SALE_FIELDS, type Expense, type ImportBatch, type Product, type Sale, type SkuAlias } from "./types";
+import { ESTIMATE_REASONS, EXPENSE_CATEGORIES, OPTIONAL_SALE_FIELDS, type Expense, type ImportBatch, type Product, type Sale, type SkuAlias } from "./types";
 
 export const LIMITS = {
   skuLength: 64,
@@ -79,6 +79,13 @@ export function saleErrors(v: unknown): string[] {
   if (s.sourceSku !== undefined && (typeof s.sourceSku !== "string" || validateSku(s.sourceSku))) {
     e.push(`SKU ตามไฟล์ต้นทางไม่ถูกต้อง (${String(s.sourceSku)})`);
   }
+  if (s.orderKey !== undefined && !isStr(s.orderKey, 200)) e.push("orderKey ไม่ถูกต้อง");
+  if (s.lineKey !== undefined && !isStr(s.lineKey, 400)) e.push("lineKey ไม่ถูกต้อง");
+  if (s.estimateUpside !== undefined && !isMoney(s.estimateUpside)) e.push("estimateUpside ไม่ถูกต้อง");
+  if (s.estimateReasons !== undefined) {
+    const er = s.estimateReasons;
+    if (!Array.isArray(er) || !er.every((r) => (ESTIMATE_REASONS as readonly unknown[]).includes(r))) e.push("estimateReasons ไม่ถูกต้อง");
+  }
   if (s.missingFields !== undefined) {
     const mf = s.missingFields;
     const ok =
@@ -106,6 +113,11 @@ export function expenseErrors(v: unknown): string[] {
   if (!isStr(x.channel, LIMITS.channelLength, true)) e.push("ช่องทางไม่ถูกต้อง");
   if (!isStr(x.note, LIMITS.noteLength, true)) e.push("หมายเหตุไม่ถูกต้อง");
   if (!isTimestamp(x.createdAt)) e.push("วันเวลาที่บันทึกไม่ถูกต้อง");
+  if (x.source !== undefined) {
+    const src = asRec(x.source);
+    if (!src || src.kind !== "settlement" || !isStr(src.entryKey, 400)) e.push("ที่มาของค่าใช้จ่ายไม่ถูกต้อง");
+  }
+  if (x.supersededBy !== undefined && !isStr(x.supersededBy, 400)) e.push("supersededBy ไม่ถูกต้อง");
   return e;
 }
 
@@ -138,3 +150,87 @@ export const isSale = (v: unknown): v is Sale => saleErrors(v).length === 0;
 export const isExpense = (v: unknown): v is Expense => expenseErrors(v).length === 0;
 export const isBatch = (v: unknown): v is ImportBatch => batchErrors(v).length === 0;
 export const isSkuAlias = (v: unknown): v is SkuAlias => skuAliasErrors(v).length === 0;
+
+// ---------- v1.3: คำสั่งซื้อและรายงานการเงิน (จำนวนเงินเป็นสตางค์ จำนวนเต็ม) ----------
+const isInt = (v: unknown, min = Number.MIN_SAFE_INTEGER): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= min;
+const ORDER_STATUS_VALUES = ["pending_payment", "paid", "processing", "shipped", "completed", "cancelled", "unspecified"];
+const FEE_KEYS = ["commission", "transaction", "service", "shipping", "other"];
+
+export function orderErrors(v: unknown): string[] {
+  const o = asRec(v);
+  if (!o) return ["ไม่ใช่ข้อมูลคำสั่งซื้อ"];
+  const e: string[] = [];
+  if (!isStr(o.key, 200)) e.push("key ไม่ถูกต้อง");
+  if (!isStr(o.channel, LIMITS.channelLength)) e.push("ช่องทางไม่ถูกต้อง");
+  if (!isStr(o.orderId, LIMITS.orderIdLength)) e.push("เลขคำสั่งซื้อไม่ถูกต้อง");
+  if (!isISODate(o.orderDate)) e.push("วันที่ไม่ถูกต้อง");
+  if (!ORDER_STATUS_VALUES.includes(o.status as string)) e.push(`สถานะไม่ถูกต้อง (${String(o.status)})`);
+  if (typeof o.rawStatus !== "string") e.push("สถานะตามไฟล์ไม่ถูกต้อง");
+  if (o.sourceUpdatedAt !== undefined && !isTimestamp(o.sourceUpdatedAt)) e.push("เวลาอัปเดตตามไฟล์ไม่ถูกต้อง");
+  if (!isStr(o.contentHash, 64) || !isInt(o.revisionCount, 0)) e.push("ข้อมูลประวัติไม่ถูกต้อง");
+  if (!isStr(o.firstBatchId, 100) || !isStr(o.lastBatchId, 100)) e.push("ชุดนำเข้าไม่ถูกต้อง");
+  if (!isTimestamp(o.createdAt) || !isTimestamp(o.updatedAt)) e.push("วันเวลาที่บันทึกไม่ถูกต้อง");
+  if (!Array.isArray(o.lines) || o.lines.length === 0) {
+    e.push("ไม่มีบรรทัดสินค้า");
+    return e;
+  }
+  const keys = new Set<string>();
+  o.lines.forEach((raw, i) => {
+    const l = asRec(raw);
+    const at = `บรรทัด ${i + 1}`;
+    if (!l) return e.push(`${at}: ไม่ถูกต้อง`);
+    if (!isStr(l.lineKey, 400) || keys.has(l.lineKey)) e.push(`${at}: lineKey ไม่ถูกต้องหรือซ้ำ`);
+    else keys.add(l.lineKey);
+    if (!isStr(l.saleId, 100)) e.push(`${at}: saleId ไม่ถูกต้อง`);
+    if (!isCount(l.quantity, 1)) e.push(`${at}: จำนวนไม่ถูกต้อง`);
+    for (const k of ["grossSatang", "sellerDiscount", "platformSubsidy", "unknownDiscount", "refundSeller", "refundPlatform", "refundUnknown", "feeRefunded", "shippingRefunded", "returnShippingCost"]) {
+      if (!isInt(l[k], 0)) e.push(`${at}: ${k} ต้องเป็นจำนวนเต็มสตางค์ไม่ติดลบ`);
+    }
+    for (const k of ["returnedResellable", "returnedDamaged", "notReturned"]) if (!isInt(l[k], 0)) e.push(`${at}: ${k} ไม่ถูกต้อง`);
+    const fees = asRec(l.fees);
+    if (!fees || !FEE_KEYS.every((k) => isInt(fees[k], 0))) e.push(`${at}: ค่าธรรมเนียมไม่ถูกต้อง`);
+    if (isCount(l.quantity, 1) && isInt(l.returnedResellable) && isInt(l.returnedDamaged) && isInt(l.notReturned)) {
+      if (l.returnedResellable + l.returnedDamaged + l.notReturned > l.quantity) e.push(`${at}: จำนวนชิ้นที่คืนรวมกันเกินจำนวนที่ขาย`);
+    }
+  });
+  return e;
+}
+
+export function orderRevisionErrors(v: unknown): string[] {
+  const r = asRec(v);
+  if (!r) return ["ไม่ใช่ข้อมูลประวัติ"];
+  const e: string[] = [];
+  if (r.seq !== undefined && !isInt(r.seq, 1)) e.push("ลำดับไม่ถูกต้อง");
+  if (!isStr(r.orderKey, 200)) e.push("orderKey ไม่ถูกต้อง");
+  if (!isStr(r.batchId, 100)) e.push("batchId ไม่ถูกต้อง");
+  if (!isTimestamp(r.appliedAt)) e.push("วันเวลาไม่ถูกต้อง");
+  if (!["create", "update", "adopt", "settlement", "user"].includes(r.kind as string)) e.push("ประเภทไม่ถูกต้อง");
+  if (!Array.isArray(r.changes)) e.push("รายการเปลี่ยนแปลงไม่ถูกต้อง");
+  return e;
+}
+
+export function settlementReportErrors(v: unknown): string[] {
+  const r = asRec(v);
+  if (!r) return ["ไม่ใช่ข้อมูลรายงานการเงิน"];
+  const e: string[] = [];
+  if (!isStr(r.id, 100)) e.push("id ไม่ถูกต้อง");
+  if (!isStr(r.adapterId, 40) || !isStr(r.fileName, LIMITS.fileNameLength) || !isStr(r.fileHash, 64)) e.push("ข้อมูลไฟล์ไม่ถูกต้อง");
+  if (r.periodFrom !== undefined && !isISODate(r.periodFrom)) e.push("ช่วงเวลาไม่ถูกต้อง");
+  if (r.periodTo !== undefined && !isISODate(r.periodTo)) e.push("ช่วงเวลาไม่ถูกต้อง");
+  if (!isTimestamp(r.importedAt) || !isInt(r.entryCount, 0)) e.push("ข้อมูลการนำเข้าไม่ถูกต้อง");
+  return e;
+}
+
+export function settlementEntryErrors(v: unknown): string[] {
+  const x = asRec(v);
+  if (!x) return ["ไม่ใช่รายการในรายงานการเงิน"];
+  const e: string[] = [];
+  if (!isStr(x.entryKey, 400)) e.push("entryKey ไม่ถูกต้อง");
+  if (!Array.isArray(x.reportIds) || x.reportIds.length === 0 || !x.reportIds.every((id) => isStr(id, 100))) e.push("reportIds ไม่ถูกต้อง");
+  if (x.orderKey !== undefined && !isStr(x.orderKey, 200)) e.push("orderKey ไม่ถูกต้อง");
+  if (![...FEE_KEYS, "fee_refund", "payout", "adjustment"].includes(x.type as string)) e.push(`ประเภทไม่ถูกต้อง (${String(x.type)})`);
+  if (!isInt(x.amount) || Math.abs(x.amount as number) > LIMITS.maxAmount * 100) e.push("จำนวนเงินต้องเป็นจำนวนเต็มสตางค์");
+  if (!isISODate(x.occurredAt)) e.push("วันที่ไม่ถูกต้อง");
+  if (typeof x.description !== "string" || x.description.length > LIMITS.noteLength) e.push("คำอธิบายไม่ถูกต้อง");
+  return e;
+}

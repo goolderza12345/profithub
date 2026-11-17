@@ -67,9 +67,24 @@ export interface Sale {
    * ทำให้กำไรเป็น "กำไรโดยประมาณ"  undefined = ข้อมูลก่อน v1.2 (ไม่ได้ติดตาม)
    */
   missingFields?: OptionalSaleField[];
+  /** v1.3+: คำสั่งซื้อที่บรรทัดนี้สังกัด (undefined = ข้อมูลก่อน v1.3 นับเหมือนเดิม) */
+  orderKey?: string;
+  lineKey?: string;
+  /** v1.3+: เหตุผลที่ตัวเลขเป็นค่าประมาณ */
+  estimateReasons?: EstimateReason[];
+  /** v1.3+: กำไรอาจสูงขึ้นได้ถึง (บาท) เมื่อส่วนลด/เงินคืนที่ไม่รู้ผู้รับภาระเป็นของแพลตฟอร์ม */
+  estimateUpside?: number;
   dedupeKey: string;
   batchId: string;
 }
+
+export const ESTIMATE_REASONS = ["unknown_discount_funding", "unknown_refund_funding", "provisional_status"] as const;
+export type EstimateReason = (typeof ESTIMATE_REASONS)[number];
+export const ESTIMATE_REASON_LABELS: Record<EstimateReason, string> = {
+  unknown_discount_funding: "ส่วนลดที่ไม่รู้ว่าร้านหรือแพลตฟอร์มรับภาระ (คิดเป็นของร้าน)",
+  unknown_refund_funding: "เงินคืนที่ไม่รู้ว่าร้านหรือแพลตฟอร์มรับภาระ (คิดเป็นของร้าน)",
+  provisional_status: "คำสั่งซื้อยังไม่สำเร็จ ค่าธรรมเนียมอาจยังไม่ใช่ยอดสุดท้าย",
+};
 
 export const EXPENSE_CATEGORIES = [
   "platform_fee",
@@ -98,6 +113,10 @@ export interface Expense {
   channel: string;
   note: string;
   createdAt: string;
+  /** v1.3+: สร้างจากรายงานการเงิน (อ่านอย่างเดียว) */
+  source?: { kind: "settlement"; entryKey: string };
+  /** v1.3+: ค่าใช้จ่ายที่กรอกเองซึ่งถูกแทนด้วยรายการในรายงานการเงิน (ไม่นับ แต่ไม่ลบ) */
+  supersededBy?: string;
 }
 
 export interface ImportBatch {

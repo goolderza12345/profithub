@@ -26,9 +26,10 @@ describe("backup: สร้างและกู้คืน", () => {
     const r = parseBackup(text(), "real");
     expect(r.ok).toBe(true);
     expect(r.errors).toEqual([]);
-    // v1.2: ไฟล์ Backup มี skuAliases เพิ่ม (schema 2)
-    expect(r.backup!.data).toEqual({ ...realData(), skuAliases: [] });
-    expect(r.backup!.counts).toEqual({ products: 1, sales: 1, expenses: 1, batches: 1, skuAliases: 0 });
+    // v1.2: skuAliases (schema 2), v1.3: คำสั่งซื้อ/ประวัติ/รายงานการเงิน (schema 3)
+    const empty3 = { orders: [], orderRevisions: [], settlementReports: [], settlementEntries: [] };
+    expect(r.backup!.data).toEqual({ ...realData(), skuAliases: [], ...empty3 });
+    expect(r.backup!.counts).toEqual({ products: 1, sales: 1, expenses: 1, batches: 1, skuAliases: 0, orders: 0, orderRevisions: 0, settlementReports: 0, settlementEntries: 0 });
     expect(r.backup!.schemaVersion).toBe(BACKUP_SCHEMA_VERSION);
   });
 

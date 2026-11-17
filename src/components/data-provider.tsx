@@ -114,6 +114,19 @@ export function DataProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // แท็บอื่นขวางการอัปเกรดฐานข้อมูล → แจ้งผู้ใช้แทนการค้างเงียบ
+  useEffect(
+    () =>
+      store.onDbEvent((e) =>
+        setError(
+          e.kind === "blocked"
+            ? "กำลังอัปเดตฐานข้อมูล แต่มี ProfitHub เปิดค้างอยู่ในแท็บอื่น — กรุณาปิดแท็บอื่นแล้วโหลดหน้านี้ใหม่"
+            : "ProfitHub ในแท็บอื่นกำลังอัปเดตฐานข้อมูล — กรุณาโหลดหน้านี้ใหม่",
+        ),
+      ),
+    [],
+  );
+
   useEffect(() => {
     let cancelled = false;
     (async () => {

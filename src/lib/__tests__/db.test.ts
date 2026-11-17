@@ -106,7 +106,7 @@ describe("replaceAll / restore (กู้คืน)", () => {
     const points = await db.listRestorePoints("real");
     expect(points).toHaveLength(before + 1);
     const point = points.find((p) => p.reason === "ทดสอบ")!;
-    expect(point.counts).toEqual({ products: 2, sales: 4, expenses: 0, batches: 1, skuAliases: 0 });
+    expect(point.counts).toEqual({ products: 2, sales: 4, expenses: 0, batches: 1, skuAliases: 0, orders: 0, orderRevisions: 0, settlementReports: 0, settlementEntries: 0 });
 
     await db.restoreFromPoint("real", point.id);
     const back = await db.loadAll("real");

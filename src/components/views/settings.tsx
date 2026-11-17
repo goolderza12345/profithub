@@ -2,10 +2,10 @@
 
 import { useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, Database, Download, FlaskConical, History, RotateCcw, ShieldCheck, Trash2, Upload, XCircle } from "lucide-react";
-import { MAX_BACKUP_BYTES, parseBackup, type BackupCheck } from "@/lib/backup";
+import { MAX_BACKUP_BYTES, parseBackup, restoreImpact, type BackupCheck } from "@/lib/backup";
 import { downloadText } from "@/lib/download";
 import { formatNumber } from "@/lib/format";
-import type { SnapshotCounts } from "@/lib/db";
+import type { Snapshot, SnapshotCounts } from "@/lib/db";
 import { useData } from "../data-provider";
 import { Button, buttonClass, Card, ConfirmDialog, inputClass, Loading, Modal, PageHeader } from "../ui";
 
@@ -254,6 +254,27 @@ export function SettingsView() {
                     </p>
                   </div>
                 </div>
+                {(() => {
+                  const im = restoreImpact(d as unknown as Snapshot, check.backup!);
+                  const items = [
+                    im.ordersUpdatedAfter && `คำสั่งซื้อ ${formatNumber(im.ordersUpdatedAfter)} รายการที่อัปเดตหลังวันที่สำรอง`,
+                    im.revisionsAfter && `ประวัติการเปลี่ยนแปลง ${formatNumber(im.revisionsAfter)} ครั้ง`,
+                    im.refundsAffected && `การคืนเงินใน ${formatNumber(im.refundsAffected)} คำสั่งซื้อ`,
+                    im.settlementReportsAfter && `รายงานการเงิน ${formatNumber(im.settlementReportsAfter)} ไฟล์`,
+                    im.batchesAfter && `การนำเข้า ${formatNumber(im.batchesAfter)} ครั้ง`,
+                    ...im.droppedKinds.map((k) => `${k.label} ทั้งหมด ${formatNumber(k.count)} รายการ (ไฟล์รุ่นเก่าไม่มีข้อมูลนี้)`),
+                  ].filter(Boolean) as string[];
+                  return items.length ? (
+                    <div className="rounded-xl bg-rose-50 p-3 text-xs text-rose-800" data-testid="restore-impact">
+                      <p className="font-medium">ข้อมูลต่อไปนี้ในเครื่องจะหายไป (กู้คืนแบบแทนที่ทั้งชุด ไม่มีการกู้คืนบางส่วน):</p>
+                      <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                        {items.map((t) => (
+                          <li key={t}>{t}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null;
+                })()}
                 {check.warnings.length > 0 && (
                   <ul className="list-disc space-y-1 rounded-xl bg-amber-50 p-3 pl-7 text-xs text-amber-900">
                     {check.warnings.map((w) => (

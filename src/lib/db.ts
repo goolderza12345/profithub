@@ -2,6 +2,7 @@ import { openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction } from "
 import type { SaleDraft } from "./csv";
 import { newId } from "./id";
 import type { DatasetId, Expense, ImportBatch, Product, Sale, SkuAlias } from "./types";
+import type { Order, OrderRevision, SettlementEntry, SettlementReport } from "./orders/types";
 
 export interface Snapshot {
   products: Product[];
@@ -10,6 +11,11 @@ export interface Snapshot {
   batches: ImportBatch[];
   /** การจับคู่ SKU (v1.2+) — undefined ในจุดกู้คืน/ไฟล์ Backup รุ่นก่อน ถือเป็นรายการว่าง */
   skuAliases?: SkuAlias[];
+  /** v1.3+ — undefined ในข้อมูลรุ่นก่อน ถือเป็นรายการว่าง */
+  orders?: Order[];
+  orderRevisions?: OrderRevision[];
+  settlementReports?: SettlementReport[];
+  settlementEntries?: SettlementEntry[];
 }
 
 export interface SnapshotCounts {
@@ -18,6 +24,10 @@ export interface SnapshotCounts {
   expenses: number;
   batches: number;
   skuAliases?: number;
+  orders?: number;
+  orderRevisions?: number;
+  settlementReports?: number;
+  settlementEntries?: number;
 }
 
 /** สำเนาข้อมูลอัตโนมัติก่อนการกระทำที่ลบ/เขียนทับข้อมูลจำนวนมาก (เก็บในฐานข้อมูลเดียวกัน) */
@@ -38,11 +48,25 @@ interface ProfitHubDB extends DBSchema {
   batches: { key: string; value: ImportBatch };
   restorePoints: { key: string; value: RestorePoint };
   skuAliases: { key: string; value: SkuAlias; indexes: { productId: string } };
+  orders: { key: string; value: Order; indexes: { status: string; orderDate: string } };
+  orderRevisions: { key: number; value: OrderRevision; indexes: { orderKey: string; batchId: string } };
+  settlementReports: { key: string; value: SettlementReport; indexes: { fileHash: string } };
+  settlementEntries: { key: string; value: SettlementEntry; indexes: { orderKey: string } };
 }
 
 export type DB = IDBPDatabase<ProfitHubDB>;
 
-const DATA_STORES = ["products", "sales", "expenses", "batches", "skuAliases"] as const;
+const DATA_STORES = [
+  "products",
+  "sales",
+  "expenses",
+  "batches",
+  "skuAliases",
+  "orders",
+  "orderRevisions",
+  "settlementReports",
+  "settlementEntries",
+] as const;
 const ALL_STORES = [...DATA_STORES, "restorePoints"] as const;
 type RWTx = IDBPTransaction<ProfitHubDB, typeof ALL_STORES extends readonly (infer T)[] ? T[] : never, "readwrite">;
 
@@ -50,8 +74,9 @@ type RWTx = IDBPTransaction<ProfitHubDB, typeof ALL_STORES extends readonly (inf
  * v1: MVP 1.0
  * v2: เพิ่ม restorePoints และบันทึกต้นทุนต่อชิ้น (snapshot) ให้รายการขายเดิม
  * v3: เพิ่ม skuAliases (จำการจับคู่ SKU จากไฟล์กับสินค้า) — ไม่แก้ข้อมูลเดิม
+ * v4: เพิ่ม orders, orderRevisions, settlementReports, settlementEntries — สร้าง store ว่าง ไม่แก้ข้อมูลเดิม
  */
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
 export const MAX_RESTORE_POINTS = 5;
 
 /** ข้อมูลจริงและข้อมูล Demo อยู่คนละฐานข้อมูลใน IndexedDB */
@@ -61,6 +86,17 @@ export const DB_NAMES: Record<DatasetId, string> = {
 };
 
 const cache = new Map<DatasetId, Promise<DB>>();
+
+export type DbEvent = { dataset: DatasetId; kind: "blocked" | "blocking" };
+const dbListeners = new Set<(e: DbEvent) => void>();
+/** ฟังเหตุการณ์การอัปเกรดฐานข้อมูลที่ถูกขวางโดยแท็บอื่น */
+export function onDbEvent(fn: (e: DbEvent) => void): () => void {
+  dbListeners.add(fn);
+  return () => dbListeners.delete(fn);
+}
+function notifyDbEvent(e: DbEvent) {
+  for (const fn of dbListeners) fn(e);
+}
 
 export function getDB(dataset: DatasetId): Promise<DB> {
   let p = cache.get(dataset);
@@ -92,6 +128,26 @@ export function getDB(dataset: DatasetId): Promise<DB> {
         if (oldVersion < 3) {
           db.createObjectStore("skuAliases", { keyPath: "alias" }).createIndex("productId", "productId");
         }
+        if (oldVersion < 4) {
+          const orders = db.createObjectStore("orders", { keyPath: "key" });
+          orders.createIndex("status", "status");
+          orders.createIndex("orderDate", "orderDate");
+          const rev = db.createObjectStore("orderRevisions", { keyPath: "seq", autoIncrement: true });
+          rev.createIndex("orderKey", "orderKey");
+          rev.createIndex("batchId", "batchId");
+          db.createObjectStore("settlementReports", { keyPath: "id" }).createIndex("fileHash", "fileHash");
+          db.createObjectStore("settlementEntries", { keyPath: "entryKey" }).createIndex("orderKey", "orderKey");
+        }
+      },
+      // แท็บอื่นเปิดฐานข้อมูลรุ่นเก่าค้างไว้ → แจ้งผู้ใช้แทนการค้างเงียบ
+      blocked() {
+        notifyDbEvent({ dataset, kind: "blocked" });
+      },
+      // แท็บนี้ขวางการอัปเกรดของแท็บอื่น → ปิดการเชื่อมต่อ ให้โหลดใหม่
+      blocking() {
+        void p?.then((db) => db.close());
+        cache.delete(dataset);
+        notifyDbEvent({ dataset, kind: "blocking" });
       },
     });
     p.catch(() => cache.delete(dataset));
@@ -131,33 +187,39 @@ export function countsOf(s: Snapshot): SnapshotCounts {
     expenses: s.expenses.length,
     batches: s.batches.length,
     skuAliases: s.skuAliases?.length ?? 0,
+    orders: s.orders?.length ?? 0,
+    orderRevisions: s.orderRevisions?.length ?? 0,
+    settlementReports: s.settlementReports?.length ?? 0,
+    settlementEntries: s.settlementEntries?.length ?? 0,
   };
 }
 
 export async function loadAll(dataset: DatasetId): Promise<Snapshot> {
   const db = await getDB(dataset);
   const tx = db.transaction(DATA_STORES, "readonly");
-  const [products, sales, expenses, batches, skuAliases] = await Promise.all([
-    tx.objectStore("products").getAll(),
-    tx.objectStore("sales").getAll(),
-    tx.objectStore("expenses").getAll(),
-    tx.objectStore("batches").getAll(),
-    tx.objectStore("skuAliases").getAll(),
+  return readAll(tx);
+}
+
+async function readAll(tx: { objectStore: RWTx["objectStore"] } | IDBPTransaction<ProfitHubDB, (typeof DATA_STORES)[number][], "readonly">): Promise<Snapshot> {
+  const t = tx as unknown as RWTx;
+  const [products, sales, expenses, batches, skuAliases, orders, orderRevisions, settlementReports, settlementEntries] = await Promise.all([
+    t.objectStore("products").getAll(),
+    t.objectStore("sales").getAll(),
+    t.objectStore("expenses").getAll(),
+    t.objectStore("batches").getAll(),
+    t.objectStore("skuAliases").getAll(),
+    t.objectStore("orders").getAll(),
+    t.objectStore("orderRevisions").getAll(),
+    t.objectStore("settlementReports").getAll(),
+    t.objectStore("settlementEntries").getAll(),
   ]);
-  return { products, sales, expenses, batches, skuAliases };
+  return { products, sales, expenses, batches, skuAliases, orders, orderRevisions, settlementReports, settlementEntries };
 }
 
 /** บันทึกจุดกู้คืนภายใน transaction เดียวกับการเปลี่ยนแปลง (ถ้าการเปลี่ยนแปลงล้มเหลว จุดกู้คืนก็ไม่ถูกสร้าง) */
 async function addRestorePoint(tx: RWTx, reason: string): Promise<boolean> {
-  const [products, sales, expenses, batches, skuAliases] = await Promise.all([
-    tx.objectStore("products").getAll(),
-    tx.objectStore("sales").getAll(),
-    tx.objectStore("expenses").getAll(),
-    tx.objectStore("batches").getAll(),
-    tx.objectStore("skuAliases").getAll(),
-  ]);
-  const data = { products, sales, expenses, batches, skuAliases };
-  if (products.length + sales.length + expenses.length + batches.length + skuAliases.length === 0) return false;
+  const data = await readAll(tx);
+  if (Object.values(countsOf(data)).every((n) => !n)) return false;
   const store = tx.objectStore("restorePoints");
   await store.put({ id: newId(), createdAt: new Date().toISOString(), reason, counts: countsOf(data), data });
   const all = await store.getAll();
@@ -193,6 +255,10 @@ export async function replaceAll(
     for (const e of data.expenses) await tx.objectStore("expenses").add(e);
     for (const b of data.batches) await tx.objectStore("batches").add(b);
     for (const a of data.skuAliases ?? []) await tx.objectStore("skuAliases").add(a);
+    for (const o of data.orders ?? []) await tx.objectStore("orders").add(o);
+    for (const r of data.orderRevisions ?? []) await tx.objectStore("orderRevisions").add(r);
+    for (const r of data.settlementReports ?? []) await tx.objectStore("settlementReports").add(r);
+    for (const e of data.settlementEntries ?? []) await tx.objectStore("settlementEntries").add(e);
     await tx.done;
   } catch (e) {
     try {
@@ -214,7 +280,7 @@ export async function restoreFromPoint(dataset: DatasetId, pointId: string): Pro
 }
 
 export async function clearAll(dataset: DatasetId, restorePoint = true): Promise<void> {
-  await replaceAll(dataset, { products: [], sales: [], expenses: [], batches: [], skuAliases: [] }, { reason: "ก่อนลบข้อมูลทั้งหมด", restorePoint });
+  await replaceAll(dataset, { products: [], sales: [], expenses: [], batches: [], skuAliases: [], orders: [], orderRevisions: [], settlementReports: [], settlementEntries: [] }, { reason: "ก่อนลบข้อมูลทั้งหมด", restorePoint });
 }
 
 export interface ProductInput {

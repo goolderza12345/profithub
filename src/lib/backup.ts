@@ -9,14 +9,26 @@
 import { checksum } from "./checksum";
 import { countsOf, type Snapshot, type SnapshotCounts } from "./db";
 import type { DatasetId } from "./types";
-import { batchErrors, expenseErrors, productErrors, saleErrors, skuAliasErrors } from "./validation";
+import {
+  batchErrors,
+  expenseErrors,
+  orderErrors,
+  orderRevisionErrors,
+  productErrors,
+  saleErrors,
+  settlementEntryErrors,
+  settlementReportErrors,
+  skuAliasErrors,
+} from "./validation";
 
 export const BACKUP_KIND = "profithub-backup";
 /**
  * 1: v1.1 (สินค้า รายการขาย ค่าใช้จ่าย ชุดนำเข้า)
  * 2: v1.2 เพิ่ม skuAliases — ยังกู้คืนไฟล์เวอร์ชัน 1 ได้ (ถือว่าไม่มีการจับคู่ SKU)
+ * 3: v1.3 เพิ่ม orders, orderRevisions, settlementReports, settlementEntries
+ *    — ยังกู้คืนไฟล์เวอร์ชัน 1/2 ได้ (ถือว่าไม่มีข้อมูลเหล่านี้ และแจ้งผู้ใช้ว่าข้อมูลใดจะหายไป)
  */
-export const BACKUP_SCHEMA_VERSION = 2;
+export const BACKUP_SCHEMA_VERSION = 3;
 export const MAX_BACKUP_BYTES = 50 * 1024 * 1024;
 const MAX_REPORTED_ERRORS = 30;
 
@@ -39,6 +51,10 @@ export function createBackup(dataset: DatasetId, data: Snapshot, now: Date = new
     expenses: data.expenses,
     batches: data.batches,
     skuAliases: data.skuAliases ?? [],
+    orders: data.orders ?? [],
+    orderRevisions: data.orderRevisions ?? [],
+    settlementReports: data.settlementReports ?? [],
+    settlementEntries: data.settlementEntries ?? [],
   };
   return {
     kind: BACKUP_KIND,
@@ -110,12 +126,25 @@ export function parseBackup(text: string, targetDataset: DatasetId): BackupCheck
     if (!Array.isArray(data[k])) return fail(`ข้อมูล ${k} ในไฟล์ไม่ถูกต้อง`);
   }
   if (f.schemaVersion >= 2 && !Array.isArray(data.skuAliases)) return fail("ข้อมูล skuAliases ในไฟล์ไม่ถูกต้อง");
+  if (f.schemaVersion >= 3) {
+    for (const k of ["orders", "orderRevisions", "settlementReports", "settlementEntries"] as const) {
+      if (!Array.isArray(data[k])) return fail(`ข้อมูล ${k} ในไฟล์ไม่ถูกต้อง`);
+    }
+  }
   if (typeof f.checksum !== "string" || checksumOf(f.dataset, data) !== f.checksum) {
     return fail("checksum ไม่ตรงกัน — ไฟล์อาจเสียหายหรือถูกแก้ไข จึงไม่กู้คืนเพื่อความปลอดภัยของข้อมูล");
   }
 
   // ไฟล์เวอร์ชัน 1 ไม่มีการจับคู่ SKU
-  const snap = { ...(data as unknown as Snapshot), skuAliases: (data.skuAliases as Snapshot["skuAliases"]) ?? [] };
+  const d = data as unknown as Snapshot;
+  const snap: Required<Snapshot> = {
+    ...d,
+    skuAliases: d.skuAliases ?? [],
+    orders: d.orders ?? [],
+    orderRevisions: d.orderRevisions ?? [],
+    settlementReports: d.settlementReports ?? [],
+    settlementEntries: d.settlementEntries ?? [],
+  };
   const aliases = snap.skuAliases;
   const push = (msg: string) => {
     if (errors.length < MAX_REPORTED_ERRORS) errors.push(msg);
@@ -131,6 +160,10 @@ export function parseBackup(text: string, targetDataset: DatasetId): BackupCheck
   check("ค่าใช้จ่าย", snap.expenses, expenseErrors);
   check("ชุดนำเข้า", snap.batches, batchErrors);
   check("การจับคู่ SKU", aliases, skuAliasErrors);
+  check("คำสั่งซื้อ", snap.orders, orderErrors);
+  check("ประวัติคำสั่งซื้อ", snap.orderRevisions, orderRevisionErrors);
+  check("รายงานการเงิน", snap.settlementReports, settlementReportErrors);
+  check("รายการในรายงานการเงิน", snap.settlementEntries, settlementEntryErrors);
 
   const dupes = <T>(label: string, items: T[], key: (t: T) => unknown) => {
     const seen = new Set<unknown>();
@@ -152,6 +185,7 @@ export function parseBackup(text: string, targetDataset: DatasetId): BackupCheck
     for (const a of aliases) {
       if (!productIds.has(a.productId)) push(`การจับคู่ SKU "${a.alias}" ชี้ไปยังสินค้าที่ไม่มีในไฟล์`);
     }
+    for (const e of referenceErrors(snap)) push(e);
   }
 
   if (errors.length === 0) {
@@ -173,4 +207,87 @@ export function parseBackup(text: string, targetDataset: DatasetId): BackupCheck
 
   if (errors.length) return { ok: false, errors, warnings };
   return { ok: true, errors: [], warnings, backup: { ...(f as unknown as BackupFile), data: snap } };
+}
+
+/**
+ * ตรวจความสัมพันธ์ระหว่างข้อมูล v1.3 — ถ้าผิดข้อใด ปฏิเสธทั้งไฟล์ (ไม่กู้คืนบางส่วน)
+ */
+export function referenceErrors(s: Required<Snapshot>): string[] {
+  const e: string[] = [];
+  const dup = <T>(label: string, items: T[], key: (t: T) => unknown) => {
+    const seen = new Set<unknown>();
+    for (const it of items) {
+      const k = key(it);
+      if (seen.has(k)) e.push(`${label} ซ้ำ: ${String(k)}`);
+      seen.add(k);
+    }
+  };
+  dup("คำสั่งซื้อ", s.orders, (o) => o.key);
+  dup("ลำดับประวัติ", s.orderRevisions.filter((r) => r.seq !== undefined), (r) => r.seq);
+  dup("รายงานการเงิน", s.settlementReports, (r) => r.id);
+  dup("รายการในรายงานการเงิน", s.settlementEntries, (x) => x.entryKey);
+
+  const sales = new Map(s.sales.map((x) => [x.id, x]));
+  const orders = new Map(s.orders.map((o) => [o.key, o]));
+  for (const o of s.orders) {
+    for (const l of o.lines) {
+      const sale = sales.get(l.saleId);
+      if (!sale) e.push(`คำสั่งซื้อ ${o.orderId}: ไม่พบรายการขายของบรรทัด ${l.lineKey}`);
+      else if (sale.orderKey !== o.key) e.push(`คำสั่งซื้อ ${o.orderId}: รายการขายของบรรทัด ${l.lineKey} ไม่ได้ผูกกับคำสั่งซื้อนี้`);
+    }
+  }
+  for (const x of s.sales) {
+    if (x.orderKey !== undefined && !orders.has(x.orderKey)) e.push(`รายการขาย ${x.orderId}: ไม่พบคำสั่งซื้อ ${x.orderKey}`);
+  }
+  for (const r of s.orderRevisions) if (!orders.has(r.orderKey)) e.push(`ประวัติลำดับ ${r.seq}: ไม่พบคำสั่งซื้อ ${r.orderKey}`);
+  const reports = new Set(s.settlementReports.map((r) => r.id));
+  const entries = new Set(s.settlementEntries.map((x) => x.entryKey));
+  for (const x of s.settlementEntries) if (!x.reportIds.every((id) => reports.has(id))) e.push(`รายการ ${x.entryKey}: ไม่พบรายงานการเงินที่อ้างถึง`);
+  for (const x of s.expenses) {
+    if (x.source && !entries.has(x.source.entryKey)) e.push(`ค่าใช้จ่าย ${x.id}: ไม่พบรายการในรายงานการเงินที่เป็นที่มา`);
+    if (x.supersededBy && !entries.has(x.supersededBy)) e.push(`ค่าใช้จ่าย ${x.id}: ไม่พบรายการในรายงานการเงินที่ใช้แทน`);
+  }
+  return e;
+}
+
+export interface RestoreImpact {
+  /** ข้อมูลในเครื่องที่ใหม่กว่าเวลาสร้างไฟล์ Backup และจะหายไปเมื่อกู้คืน */
+  ordersUpdatedAfter: number;
+  revisionsAfter: number;
+  refundsAffected: number;
+  settlementReportsAfter: number;
+  batchesAfter: number;
+  /** ไฟล์รุ่นเก่าไม่มีข้อมูลประเภทนี้ แต่ในเครื่องมี → จะถูกลบทั้งหมด */
+  droppedKinds: { label: string; count: number }[];
+}
+
+/** สรุปผลกระทบก่อนกู้คืน เพื่อแจ้งผู้ใช้ (การกู้คืนเป็นแบบแทนที่ทั้งชุดเสมอ) */
+export function restoreImpact(current: Snapshot, backup: BackupFile): RestoreImpact {
+  const at = backup.exportedAt;
+  const orders = current.orders ?? [];
+  const backupOrders = new Map((backup.data.orders ?? []).map((o) => [o.key, o]));
+  const refundTotal = (o: { lines: { refundSeller: number; refundPlatform: number; refundUnknown: number }[] }) =>
+    o.lines.reduce((a, l) => a + l.refundSeller + l.refundPlatform + l.refundUnknown, 0);
+  const dropped: { label: string; count: number }[] = [];
+  if (backup.schemaVersion < 3) {
+    const add = (label: string, n: number) => n > 0 && dropped.push({ label, count: n });
+    add("คำสั่งซื้อและสถานะ", orders.length);
+    add("ประวัติการเปลี่ยนแปลงคำสั่งซื้อ", current.orderRevisions?.length ?? 0);
+    add("รายงานการเงิน", current.settlementReports?.length ?? 0);
+  }
+  if (backup.schemaVersion < 2) {
+    const n = current.skuAliases?.length ?? 0;
+    if (n) dropped.push({ label: "การจับคู่ SKU", count: n });
+  }
+  return {
+    ordersUpdatedAfter: orders.filter((o) => o.updatedAt > at).length,
+    revisionsAfter: (current.orderRevisions ?? []).filter((r) => r.appliedAt > at).length,
+    refundsAffected: orders.filter((o) => {
+      const before = backupOrders.get(o.key);
+      return refundTotal(o) !== (before ? refundTotal(before) : 0) && refundTotal(o) > 0;
+    }).length,
+    settlementReportsAfter: (current.settlementReports ?? []).filter((r) => r.importedAt > at).length,
+    batchesAfter: current.batches.filter((b) => b.importedAt > at).length,
+    droppedKinds: dropped,
+  };
 }
